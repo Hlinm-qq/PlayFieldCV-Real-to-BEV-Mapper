@@ -1,222 +1,273 @@
-import os
-import math
-import torch
-import cv2
-import glob
-import random
-import torchvision
 import time
 
-import numpy as np
-import matplotlib.pyplot as plt
+from utils.utils import *
+from engine.engine import *
+from engine.sink import *
+from engine.preprocessor import *
+from engine.postprocessor import *
+from data_manager.input_manager import *
+from data_manager.output_manager import *
 
-from torch.utils.data import Dataset, DataLoader, Subset
-from pathlib import Path
-from enum import Enum
+def tracker_pipeline_v0(config: PipelineConfig, device):
+    # Initialize unified stream reader
+    stream = UnifiedSource(config.source_path)
+    stream.set_max_frame(config.frame_count)
+    is_live_stream = isinstance(config.source_path, int) and config.source_path == 0
+    is_images = True if stream.get_type() != "video" else False
 
-from ultralytics import YOLO
+    # Handler
+    tracker = SORTTracker()
+    output_manager = OutputManager()
+    engine_manager = EngineManager(None, config.model_path)
 
-print("PyTorch version:", torch.__version__)
-print("CUDA available:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("CUDA version:", torch.version.cuda)
-    print("GPU device:", torch.cuda.get_device_name(0))
-    print("GPU count:", torch.cuda.device_count())
+    # Determine what FPS we are trying to follow
+    target_fps = config.target_fps # default not limited
+    if not is_images:
+        # Acquire the stream FPS
+        target_fps = stream.get_fps()
 
-print(torch.cuda.is_available())  # True if GPU detected
+    # Calculate the sleep target
+    target_frame_time = (1.0 / target_fps) if target_fps > 0 else 0
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-data_dir = os.path.join(".", "dataset")
-archive_dir = os.path.join("..", "dataset")
-pascal_2012_dir = os.path.join(archive_dir, "VOC2012", "JPEGImages")
-
-class UnifiedSource:
-    def __init__(self, source_path):
-        """
-        source_path can be:
-        - 0 (integer): local webcam
-        - *.mp4 (String): Video file
-        - *.jpg (String): Single image file
-        - "dataset/frames/" (String): Folder of images
-        """
-        self.source_type = None
-        self.capture = None
-        self.valid_image_extensions = ('.jpg', '.jpeg', '.png', '.bmp')
-        self.image_paths = []
-        self.frame_count = 0
-        self.max_frame = 10
-
-        # Check if source is folder of images
-        if isinstance(source_path, str) and os.path.isdir(source_path):
-            self.source_type = "folder"
-            self.image_paths = sorted([
-                os.path.join(source_path, f) for f in os.listdir(source_path)
-                if f.lower().endswith(self.valid_image_extensions)
-            ])
-
-            if not self.image_paths:
-                raise ValueError(f"No images found in directory: {source_path}")
-        # Check if source is a single image
-        elif isinstance(source_path, str) and source_path.lower().endswith(self.valid_image_extensions):
-            self.source_type = "image"
-            if not os.path.exists(source_path):
-                raise FileNotFoundError(f"Image not found: {source_path}")
-            self.image_paths = [source_path]
-        # Treat as Video file
-        else:
-            self.source_type = "video"
-            self.capture = cv2.VideoCapture(source_path)
-            if not self.capture.isOpened():
-                raise ValueError(f"Failed to open video source: {source_path}")
-
-    def get_frame(self):
-        """
-        Generator that streams the data
-        """
-        # Is image(s) 
-        if self.source_type in ["folder", "image"]:
-            for path in self.image_paths:
-                if self.frame_count > self.max_frame:
-                    break
-                
-                frame = cv2.imread(path)
-                if frame is not None:
-                    self.frame_count += 1
-                    yield frame
-            return
-        # Is Video stream
-        elif self.source_type == "video":
-            while True and self.frame_count < self.max_frame:
-                success, frame = self.capture.read()
-                if not success:
-                    break
-                self.frame_count += 1
-                yield frame
-    
-    def get_type(self):
-        return self.source_type
-    
-    def set_max_frame(self, val: int):
-        self.max_frame = val
-        
-    def close(self):
-        if self.capture is not None:
-            self.capture.release()
-
-class EngineType(Enum):
-    ULTRALYTICSYOLO = 1
-    OTHER = 2
-
-def load_model(type: EngineType):
-    if type == EngineType.ULTRALYTICSYOLO:
-        return YOLO('yolov8n.pt')
-
-source_path = pascal_2012_dir
-frame_count = 5
-
-# Initialize unified stream reader
-stream = UnifiedSource(source_path)
-stream.set_max_frame(frame_count)
-is_live_stream = isinstance(source_path, int) and source_path == 0
-is_images = True if stream.get_type() != "video" else False
-
-# Determine what FPS we are trying to follow
-target_fps = 0
-if is_live_stream:
-    target_fps = 0 # Live streams run AFAP on the newest frame, no throttling
-elif is_images:
-    # Set for visual playback
-    # target_fps = min(30, frame_count) 
-    target_fps = 0
-else:
-    # Video file. Read its native metadata.
-    temp_cap = cv2.VideoCapture(source_path)
-    target_fps = temp_cap.get(cv2.CAP_PROP_FPS)
-    temp_cap.release()
-
-# Calculate the sleep target
-target_frame_time = (1.0 / target_fps) if target_fps > 0 else 0
-
-model = load_model(EngineType.ULTRALYTICSYOLO)
-model.to(device)
-print(model.device)
-
-# --- PIPELINE LOOP ---
-for frame in stream.get_frame():
-    # frame = cv2.imread("dummy.jpg") # Placeholder for stream.get_frame()
-    
-    loop_start_time = time.time()
-
-    # ==========================================
-    # A. EXECUTE THE AI (Preprocess -> Engine -> Postprocess)
-    # ==========================================
-    if not is_images and not is_live_stream:
-        results = model(frame, stream=True)
+    if config.use_wrapper:
+        model = engine_manager.load_model(EngineType.ULTRALYTICSYOLO)
     else:
-        results = model(frame)
+        model = engine_manager.load_model(EngineType.ULTRALYTICSYOLO, is_raw=True)
+    model.to(device)
+    # print(model.device)
 
-    for result in results:
-        # result extraction
-        boxes = result.boxes
+    try:
+        # --- PIPELINE LOOP ---
+        for frame in stream.get_frame():
+            loop_start_time = time.time()
+        
+            # Inference (Preprocess -> Engine -> Postprocess)
+            if not config.enable_tracking:
+                if not is_images and not is_live_stream:
+                    results = model(frame, stream=True)
+                else:
+                    results = model(frame)
+            else:
+                results = model.track(frame, persist=True, conf=0.1)
+            print(f"Result size: {len(results)}")
 
-        if boxes is not None:
-            xywh_array = boxes.xywh.cpu().numpy()
-            confidences = boxes.conf.cpu().numpy() # confidence score for each box
-            names = [result.names[id.item()] for id in boxes.cls.int().cpu().numpy()] # class name of each box
-            # names = [id.item() for id in boxes.cls.int().cpu().numpy()] # class name of each box
-            # print(names)
+            sort_detections = []
+            track_ids = [] 
+            for result in results:
+                # result extraction
+                boxes = result.boxes
+        
+                if boxes is not None and len(boxes) > 0:
+                    xyxy_array = boxes.xyxy.cpu().numpy()
+                    xywh_array = boxes.xywh.cpu().numpy()
+                    confidences = boxes.conf.cpu().numpy() # confidence score for each box
+                    names = [result.names[id.item()] for id in boxes.cls.int().cpu().numpy()] # class name of each box
+                    
+                    if config.enable_tracking and boxes.id is not None:
+                        track_ids = boxes.id.cpu().numpy().astype(int)
+                    else:
+                        track_ids = [0] * confidences.shape[0]
 
-            for (cx, cy, w, h), conf, name in zip(xywh_array, confidences, names):
-                print(f"Frame object -> Class: {name} | Conf: {conf:.2f} | X:{cx:.1f} Y:{cy:.1f} W:{w:.1f} H:{h:.1f}")
+                    # print(f"Boxes shape: {getattr(xywh_array, 'shape', len(xywh_array))}")
+                    # print(f"Conf: {len(confidences)}, Names: {len(names)}, Tracks: {len(track_ids)}")
+                    for (cx, cy, w, h), conf, name, track_id in zip(xywh_array, confidences, names, track_ids):
+                        print(f"Frame object -> Class: {name} | Conf: {conf:.2f} | X:{cx:.1f} Y:{cy:.1f} W:{w:.1f} H:{h:.1f}")
+        
+                        x_top_left = int(cx - (w / 2))
+                        y_top_left = int(cy - (h / 2))
+                        text_y = max(15, y_top_left - 10)
+        
+                        cv2.rectangle(frame, (x_top_left, y_top_left), (x_top_left + int(w), y_top_left + int(h)), (0, 255, 0), 2)
+                        cv2.putText(frame, f"{name}: {conf:.2f}", (x_top_left, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                        if config.enable_tracking:
+                            cv2.putText(frame, f"ID: {track_id}", (x_top_left, text_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)           
 
-                x_top_left = int(cx - (w / 2))
-                y_top_left = int(cy - (h / 2))
+            # Measure pipeline speed
+            process_time = time.time() - loop_start_time
+        
+            # Throttle, short delay to match target FPS, if applicable
+            if target_frame_time > 0 and process_time < target_frame_time:
+                sleep_amount = target_frame_time - process_time
+                time.sleep(sleep_amount)
+        
+            # Calculate real final FPS
+            total_loop_time = time.time() - loop_start_time
+            actual_fps = 1.0 / total_loop_time if total_loop_time > 0 else 0
+        
+            # Draw telemetry on screen
+            cv2.putText(frame, f"Target FPS: {target_fps if target_fps > 0 else 'MAX'}", 
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            cv2.putText(frame, f"Actual FPS: {int(actual_fps)}", 
+                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            print(f"Target FPS: {target_fps if target_fps > 0 else 'MAX'}")
+            print(f"Actual FPS: {int(actual_fps)}")
 
-                cv2.rectangle(frame, (x_top_left, y_top_left), (x_top_left + int(w), y_top_left + int(h)), (0, 255, 0), 2)
-                cv2.putText(frame, f"{name}", (x_top_left, y_top_left - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+            # Display result
+            key_pressed = output_manager.display_frame(frame)
+            if not output_manager.get_is_notebook():
+                cv2.waitKey(1000 * config.sleep_second)
+            else:
+                time.sleep(config.sleep_second)
+            # cv2.imshow("System Output", frame)
+            if key_pressed == ord('q'): break
 
-        # cv2.imshow("Frame", frame)
-        # if cv2.waitKey(1) & 0xFF == ord('q'):
-        #     break
+    except KeyboardInterrupt:
+        # This catches the Ctrl+C or force-stop so it doesn't print a massive error
+        print_boxed_message("Force stopped. Cleaning up...")
+        return False
 
-    # ==========================================
-    # B. MEASURE PIPELINE SPEED
-    # ==========================================
-    process_time = time.time() - loop_start_time
+    finally:
+        print_boxed_message("Closing streams and windows...")
+        stream.close()
+        cv2.destroyAllWindows()
 
-    # ==========================================
-    # C. THROTTLE (If necessary)
-    # ==========================================
-    # If we are processing a video/folder AND our AI is faster than the target FPS
-    if target_frame_time > 0 and process_time < target_frame_time:
-        sleep_amount = target_frame_time - process_time
-        time.sleep(sleep_amount)
+        if output_manager.get_is_notebook():
+            cv2.waitKey(1)
+        
+    return True
 
-    # ==========================================
-    # D. CALCULATE FINAL END-TO-END FPS
-    # ==========================================
-    total_loop_time = time.time() - loop_start_time
-    actual_fps = 1.0 / total_loop_time if total_loop_time > 0 else 0
+def tracker_pipeline_v1(config: PipelineConfig, device):
+    # Initialize unified stream reader
+    stream = UnifiedSource(config.source_path)
+    stream.set_max_frame(config.frame_count)
+    is_live_stream = isinstance(config.source_path, int) and config.source_path == 0
+    is_images = True if stream.get_type() != "video" else False
 
-    # Draw telemetry on screen
-    cv2.putText(frame, f"Target FPS: {target_fps if target_fps > 0 else 'MAX'}", 
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-    cv2.putText(frame, f"Actual FPS: {int(actual_fps)}", 
-                (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    # Handler
+    preprocessor = Preprocessor()
+    postprocessor = YOLOPostprocessor()
+    tracker = SORTTracker()
+    output_manager = OutputManager()
+    engine_manager = EngineManager(None, config.model_path)
 
-    cv2.namedWindow("Window", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Window", 1280, 720)
-    cv2.imshow("Window", frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'): break
-    cv2.waitKey(1000 * 10)
-    # time.sleep(15)
+    # Determine what FPS we are trying to follow
+    target_fps = config.target_fps # default not limited
+    if not is_images:
+        # Acquire the stream FPS
+        target_fps = stream.get_fps()
 
-stream.close()
-cv2.destroyAllWindows()
+    # Calculate the sleep target
+    target_frame_time = (1.0 / target_fps) if target_fps > 0 else 0
 
+    model = engine_manager.load_model(EngineType.ULTRALYTICSYOLO, is_raw=True)
+    model.to(device)
 
+    try:
+        # --- PIPELINE LOOP ---
+        for frame in stream.get_frame():
+            loop_start_time = time.time()
+        
+            # Preprocess
+            input_tensor, ratio, dw, dh = preprocessor.process(frame)
+            input_tensor = input_tensor.to(device)
 
+            # Forward Pass
+            with torch.no_grad():
+                raw_output = model(input_tensor)[0]
+            print(raw_output.shape)
 
+            # Postprocess 
+            Detections = postprocessor.process(raw_output, ratio, dw, dh, config.confidence_threshold, config.nms_threshold)
+            print(f"Detection size: {len(Detections)}")
 
+            active_tracks = tracker.update(Detections)
+            
+            for track in active_tracks:
+                track_id = track['track_id']
 
+                box = track['box']
+                print(box)
+
+                x1, y1, x2, y2 = map(int, box)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(frame, f"ID: {track_id}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+                        
+            # Measure pipeline speed
+            process_time = time.time() - loop_start_time
+        
+            # Throttle, short delay to match target FPS, if applicable
+            if target_frame_time > 0 and process_time < target_frame_time:
+                sleep_amount = target_frame_time - process_time
+                time.sleep(sleep_amount)
+        
+            # Calculate real final FPS
+            total_loop_time = time.time() - loop_start_time
+            actual_fps = 1.0 / total_loop_time if total_loop_time > 0 else 0
+        
+            # Draw telemetry on screen
+            cv2.putText(frame, f"Target FPS: {target_fps if target_fps > 0 else 'MAX'}", 
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            cv2.putText(frame, f"Actual FPS: {int(actual_fps)}", 
+                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            print(f"Target FPS: {target_fps if target_fps > 0 else 'MAX'}")
+            print(f"Actual FPS: {int(actual_fps)}")
+
+            # Display result
+            key_pressed = output_manager.display_frame(frame)
+            if not output_manager.get_is_notebook():
+                cv2.waitKey(1000 * config.sleep_second)
+            else:
+                time.sleep(config.sleep_second)
+            # cv2.imshow("System Output", frame)
+            if key_pressed == ord('q'): break
+
+    except KeyboardInterrupt:
+        # This catches the Ctrl+C or force-stop so it doesn't print a massive error
+        print_boxed_message("Force stopped. Cleaning up...")
+        return False
+
+    finally:
+        print_boxed_message("Closing streams and windows...")
+        stream.close()
+        cv2.destroyAllWindows()
+
+        if output_manager.get_is_notebook():
+            cv2.waitKey(1)
+        
+    # Return "finish" flag
+    return True
+
+def main():
+    print("PyTorch version:", torch.__version__)
+    print("CUDA available:", torch.cuda.is_available())
+    if torch.cuda.is_available():
+        print("CUDA version:", torch.version.cuda)
+        print("GPU device:", torch.cuda.get_device_name(0))
+        print("GPU count:", torch.cuda.device_count())
+
+    print(torch.cuda.is_available())  # True if GPU detected
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    archive_dir = get_path("../dataset")
+    pascal_2012_dir = archive_dir / get_path("VOC2012/JPEGImages")
+    video_frame_dir = archive_dir / get_path("video_frame/people/images")
+    volley_dir = archive_dir / get_path("volley_ball_2/train/images")
+
+    # target_source1 = volley_dir
+    # check_path(target_source1)
+    # config_v0 = PipelineConfig(source_path=str(target_source1),
+    #                         use_wrapper=True,
+    #                         enable_tracking=False)
+    # is_finished = tracker_pipeline_v0(config_v0, device)
+
+    target_source2 = video_frame_dir
+    check_path(target_source2)
+    config_v1 = PipelineConfig(source_path=str(target_source2))
+    is_finished = tracker_pipeline_v1(config_v1, device)
+
+    return is_finished
+
+if __name__ == "__main__":
+    result = main()
+    if result:
+        print(f"Pipeline ran successfully")
+    else:
+        print(f"Pipeline failed")
+
+    # parent_dir = Path("..") 
+    # dataset_dir = parent_dir / "dataset"
+
+    # target_dir = dataset_dir / "volley_ball_2" / "train" / "images"
+    # rename_media(target_dir, "frame", MediaFilter.IMAGES, overwrite=True)
+    None
