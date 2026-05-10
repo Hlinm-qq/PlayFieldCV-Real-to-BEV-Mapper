@@ -2,8 +2,10 @@ import os
 import cv2
 import math
 import torch
+import numpy as np
 from pathlib import Path
 from enum import IntFlag, auto
+from datetime import datetime
 
 from dataclasses import dataclass
 from typing import Optional, Any
@@ -29,13 +31,22 @@ class PipelineConfig:
     use_wrapper: bool = False
     enable_tracking: bool = False
 
+    # Output Options
+    is_combine_result: bool = False
+    save_video: bool = False
+    map_padding: int = 0
+    class_id_filter: list = None
+    
+    # Point picker
+    is_manual_picker: bool = True
+
 # Binary Flags
 class MediaFilter(IntFlag):
     NONE = 0
     IMAGES = auto()  # 1 (0b001)
     VIDEOS = auto()  # 2 (0b010)
     TEXTS = auto()   # 4 (0b100)
-    ALL = IMAGES | VIDEOS | TEXTS    
+    ALL = IMAGES | VIDEOS | TEXTS 
 
 def rename_media(directory_path, prefix="", mode=MediaFilter.ALL, start_num=1, overwrite=True):
     """
@@ -167,3 +178,85 @@ def check_path(path_obj: Path):
     if not path_obj.exists():
         raise ValueError("The path {path_obj} does not exist")
     return True
+
+def dict_to_list(data_dict):
+    """
+    Converts a dict of lists into a list of dicts.
+    Uses the shortest list length as the limit.
+    """
+    # Get the keys and the lists (values)
+    keys = data_dict.keys()
+    values = data_dict.values()
+
+    # zip(*values) group the elements by 'index' of every list, stop at shortest list length
+    return [dict(zip(keys, row)) for row in zip(*values)]
+
+# def save_image(image, folder="output", filename=None, prefix="img"):
+#     """
+#     Saves an OpenCV image, handles directory creation and naming.
+#     """
+#     # Validation: avoid empty image
+#     if image is None:
+#         print("Save Error: Image is empty (None).")
+#         return False
+
+#     # Path Handling
+#     save_path = Path(folder)
+#     save_path.mkdir(parents=True, exist_ok=True)
+
+#     # Naming: If no name is given, use a timestamp
+#     if filename is None:
+#         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+#         filename = f"{prefix}_{timestamp}.jpg"
+
+#     full_path = save_path / filename
+#     success = cv2.imwrite(str(full_path), image)
+    
+#     if success:
+#         # print(f"Successfully saved: {full_path}")
+#         None
+#     else:
+#         # print(f"Failed to save image to: {full_path}")
+#         None
+        
+#     return success
+
+def get_frame_stats(img: np.ndarray):
+    h, w, c = img.shape
+    stats = {
+        "Dimensions": (w, h),
+        "Total Pixels": img.size // c,
+        "Data Type": img.dtype,
+        "Min": np.min(img),
+        "Max": np.max(img),
+        "Mean": np.mean(img),
+        "Std Dev": np.std(img)
+    }
+    return stats
+
+def stitch_two_frames(img1, img2, bg_color=(40, 40, 40)):
+    """
+    Horizontally stitches two images. If one is shorter, it pads the 
+    top and bottom with a background color to perfectly center it.
+    bg_color defaults to a sleek dark gray (BGR format).
+    """
+    h1, w1 = img1.shape[:2]
+    h2, w2 = img2.shape[:2]
+
+    max_h = max(h1, h2)
+
+    # Pad image 1 if it is shorter
+    if h1 < max_h:
+        diff = max_h - h1
+        pad_top = diff // 2
+        pad_bottom = diff - pad_top
+        img1 = cv2.copyMakeBorder(img1, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, value=bg_color)
+
+    # Pad image 2 if it is shorter
+    if h2 < max_h:
+        diff = max_h - h2
+        pad_top = diff // 2
+        pad_bottom = diff - pad_top
+        img2 = cv2.copyMakeBorder(img2, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, value=bg_color)
+
+    return cv2.hconcat([img1, img2])

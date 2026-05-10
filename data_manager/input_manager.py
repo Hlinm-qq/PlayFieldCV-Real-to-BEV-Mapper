@@ -1,5 +1,6 @@
 import os
 import cv2
+import numpy as np
 
 class UnifiedSource:
     def __init__(self, source_path):
@@ -80,3 +81,40 @@ class UnifiedSource:
         # Read its native metadata
         if self.source_type == "video":
             return self.capture.get(cv2.CAP_PROP_FPS)
+
+    def get_first_frame(self):
+        """
+        Get the first frame of given source
+        """
+        # Is image(s) 
+        if self.source_type in ["folder", "image"]:
+            for path in self.image_paths:
+                if self.frame_count > self.max_frame:
+                    break
+                
+                frame = cv2.imread(path)
+                if frame is not None:
+                    self.frame_count += 1
+                    return frame
+            return
+        # Is Video stream
+        elif self.source_type == "video":
+            while True and self.frame_count < self.max_frame:
+                success, frame = self.capture.read()
+                if not success:
+                    break
+                self.frame_count += 1
+                return frame
+            
+    def get_frame_stats(self, img: np.ndarray):
+        h, w, c = img.shape
+        stats = {
+            "Dimensions": (w, h),
+            "Total Pixels": img.size // c,
+            "Data Type": img.dtype,
+            "Min": np.min(img),
+            "Max": np.max(img),
+            "Mean": np.mean(img),
+            "Std Dev": np.std(img)
+        }
+        return stats

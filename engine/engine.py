@@ -1,14 +1,18 @@
 from enum import Enum
 from ultralytics import YOLO
+from enum import IntFlag, auto
 
 class EngineType(Enum):
     ULTRALYTICSYOLO = 1
     OTHER = 2
 
-def get_object_classes(model, model_source: EngineType):
-    if (model_source == EngineType.ULTRALYTICSYOLO):
-        return list(model.names.values())
-    return []
+class BoxFormat(IntFlag):
+    NONE = 0
+    XYXY = auto()      # 1
+    XYWH = auto()      # 2
+    CLASSES = auto()   # 4
+    CONFIDENCE = auto()# 8
+    ALL = XYXY | XYWH | CLASSES | CONFIDENCE 
 
 class EngineManager:
     def __init__(self, type: EngineType, weight_path, using_raw=False):
@@ -29,3 +33,36 @@ class EngineManager:
                 model = YOLO(self.weight_path) 
 
         return model
+    
+    def get_output(self, model_output, desired_flags: BoxFormat):
+        """
+        Parses raw model output based on selected flags.
+        """
+        processed_results = []
+        entry = {}
+        results = model_output
+
+        if self.engine_type == EngineType.ULTRALYTICSYOLO:
+            # print("results")
+            # print(results)
+            for result in results:
+                boxes = result.boxes
+                # print("boxes")
+                # print(boxes)
+                if boxes is not None and len(boxes) > 0:
+                    # Bitwise checks to see what to include
+
+                    if BoxFormat.XYXY in desired_flags:
+                        entry['xyxy'] = boxes.xyxy.cpu().numpy().astype(int)
+
+                    if BoxFormat.XYWH in desired_flags:
+                        entry['xywh'] = boxes.xywh.cpu().numpy().astype(int)
+
+                    if BoxFormat.CLASSES in desired_flags:
+                        names = [result.names[id.item()] for id in boxes.cls.int().cpu().numpy()] # class name of each box
+                        entry['class'] = names
+
+                    if BoxFormat.CONFIDENCE in desired_flags:
+                        entry['confidence'] = boxes.conf.cpu().numpy()
+           
+        return entry
