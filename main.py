@@ -230,6 +230,16 @@ def tracker_pipeline_v1(config: PipelineConfig, device):
     return True
 
 def tracker_pipeline_v2(config: PipelineConfig, device):
+    # Standard COCO 17-Keypoint Skeleton Pairs
+    SKELETON_CONNECTIONS = [
+        (0, 1), (0, 2), (1, 3), (2, 4),           # Head/Face
+        (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),  # Torso and Arms
+        (5, 11), (6, 12), (11, 12),               # Hips
+        (11, 13), (13, 15), (12, 14), (14, 16)    # Legs
+    ]
+
+    print_config(config)
+
     # Initialize unified stream reader
     stream = UnifiedSource(config.source_path)
     stream.set_max_frame(config.frame_count)
@@ -295,6 +305,7 @@ def tracker_pipeline_v2(config: PipelineConfig, device):
             output_manager.init_video_writer(output_video_fps, video_width, video_height)
 
     frame_counter = 0
+    player_history = {}
     
     try:
         # --- PIPELINE LOOP ---
@@ -313,10 +324,10 @@ def tracker_pipeline_v2(config: PipelineConfig, device):
                 else:
                     outputs = model(frame, classes=config.class_id_filter)
             else:
-                outputs = model.track(frame, persist=True, conf=0.1, classes=config.class_id_filter)
+                outputs = model.track(frame, persist=True, conf=0.45, iou=0.5, tracker="botsort.yaml", classes=config.class_id_filter)
             print(f"Result size: {len(outputs)}")
 
-            results = dict_to_list(engine_manager.get_output(outputs, BoxFormat.XYXY))
+            results = dict_to_list(engine_manager.get_output(outputs, BoxFormat.XYXY | BoxFormat.ID | BoxFormat.KEYPOINT))
             players = []
             
             # print("results")
@@ -326,15 +337,58 @@ def tracker_pipeline_v2(config: PipelineConfig, device):
             # print(outputs)
             # return True
 
+            # Threshold to trust the ankle
+            CONF_THRESH = 0.5 
+
             for result in results:
-                x1, y1, x2, y2 = result["xyxy"]
+                track_id = result.get("id", -1) 
+                x1, y1, x2, y2 = result.get("xyxy", [0,0,0,0])
                 # print('result["xyxy"]')
                 # print(result["xyxy"])
+
                 # Calculate foot coordinate (bottom center of bounding box)
                 foot_x = int((x1 + x2) / 2)
                 foot_y = int(y2)
+
+                # Pose Estimation
+                kpts_xy = result.get("keypoints_xy")
+                print(kpts_xy)
+                kpts_conf = result.get("keypoints_conf")
+                is_occluded = True
+
+                if kpts_xy is not None and kpts_conf is not None:
+                    # left (15) and right (16) ankles
+                    l_ankle_xy = kpts_xy[15]
+                    r_ankle_xy = kpts_xy[16]
+                    l_ankle_conf = kpts_conf[15]
+                    r_ankle_conf = kpts_conf[16]
+
+                    valid_ankles_x = []
+                    valid_ankles_y = []
+
+                    if l_ankle_conf > CONF_THRESH:
+                        valid_ankles_x.append(l_ankle_xy[0])
+                        valid_ankles_y.append(l_ankle_xy[1])
+                    
+                    if r_ankle_conf > CONF_THRESH:
+                        valid_ankles_x.append(r_ankle_xy[0])
+                        valid_ankles_y.append(r_ankle_xy[1])
+
+                    # At least one ankle clearly
+                    if len(valid_ankles_x) > 0:
+                        foot_x = int(sum(valid_ankles_x) / len(valid_ankles_x))
+                        foot_y = int(sum(valid_ankles_y) / len(valid_ankles_y))
+                        is_occluded = False
+
+                # Occlusion handling, by history position
+                if track_id != -1:
+                    if is_occluded and track_id in player_history:
+                        foot_x, foot_y = player_history[track_id]
+                    else:
+                        player_history[track_id] = (foot_x, foot_y)
                 
                 players.append({
+                    "id": track_id,
                     "foot_x": foot_x,
                     "foot_y": foot_y,
                     "bbox": (int(x1), int(y1), int(x2), int(y2))
@@ -342,12 +396,34 @@ def tracker_pipeline_v2(config: PipelineConfig, device):
                 
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.circle(frame, (foot_x, foot_y), 5, (255, 0, 0), -1)
+                if track_id != -1:
+                    cv2.putText(frame, f"ID: {track_id}", (x1, y1 - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    
+                # draw pose estimation
+                if kpts_xy is not None and kpts_conf is not None:
+                    # keypoints
+                    for i, (x, y) in enumerate(kpts_xy):
+                        conf = kpts_conf[i]
+                        if conf > CONF_THRESH: 
+                            cv2.circle(frame, (int(x), int(y)), 3, (0, 255, 0), -1)
+
+                    # bones (edges)
+                    for pt1, pt2 in SKELETON_CONNECTIONS:
+                        conf1 = kpts_conf[pt1]
+                        conf2 = kpts_conf[pt2]
+                        
+                        # Only draw the line if BOTH connected points are visible
+                        if conf1 > CONF_THRESH and conf2 > CONF_THRESH:
+                            x_a, y_a = kpts_xy[pt1]
+                            x_b, y_b = kpts_xy[pt2]
+                            cv2.line(frame, (int(x_a), int(y_a)), (int(x_b), int(y_b)), (255, 0, 255), 2)
 
                 # Math: Convert real foot coordinate to map coordinate
                 map_x, map_y = projector.get_map_coordinate(foot_x, foot_y)
                 
                 # Draw: Plot it on the 2D canvas
-                map_canvas = visualizer.draw_player_on_map(map_canvas, map_x, map_y, -1)
+                map_canvas = visualizer.draw_player_on_map(map_canvas, map_x, map_y, track_id)
             
             # Measure pipeline speed
             process_time = time.time() - loop_start_time
@@ -380,7 +456,7 @@ def tracker_pipeline_v2(config: PipelineConfig, device):
                     output_manager.save_image(frame, 'output', f"ori_frame_{frame_counter}.jpg")
                     output_manager.save_image(map_canvas, 'output', f"map_frame_{frame_counter}.jpg")
                 else:
-                    output_manager.save_image(combined_view, 'output', f"combines_frame_{frame_counter}.jpg")
+                    output_manager.save_image(combined_view, 'output', f"combined_frame_{frame_counter}.jpg")
 
             if config.save_video:
                 if config.is_combine_result:
@@ -457,11 +533,12 @@ def main():
                             use_wrapper=True,
                             enable_tracking=False,
                             is_combine_result=True, 
-                            save_video=True,
+                            save_video=False,
                             map_padding=5, 
                             class_id_filter=target_classes,
                             is_manual_picker=False,
-                            frame_count=10)
+                            frame_count=2, 
+                            model_path="yolov8s-pose.pt")
     is_finished = tracker_pipeline_v2(config, device)
 
     return is_finished

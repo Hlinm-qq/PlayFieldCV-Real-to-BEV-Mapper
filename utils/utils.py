@@ -7,7 +7,7 @@ from pathlib import Path
 from enum import IntFlag, auto
 from datetime import datetime
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Optional, Any
 
 @dataclass
@@ -260,3 +260,23 @@ def stitch_two_frames(img1, img2, bg_color=(40, 40, 40)):
         img2 = cv2.copyMakeBorder(img2, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, value=bg_color)
 
     return cv2.hconcat([img1, img2])
+
+def print_config(config: PipelineConfig):
+    """Prints the PipelineConfig"""
+    print("\n" + "="*30)
+    print(" PIPELINE CONFIGURATION")
+    print("="*30)
+    
+    # Convert dataclass to dictionary
+    config_dict = asdict(config)
+    
+    for key, value in config_dict.items():
+        # Format keys for readability (e.g., source_path -> Source Path)
+        display_key = key.replace('_', ' ').title()
+        
+        # Handle None or empty lists gracefully
+        display_val = value if value is not None else "Not Set"
+        
+        print(f"{display_key:<20}: {display_val}")
+    
+    print("="*30 + "\n")

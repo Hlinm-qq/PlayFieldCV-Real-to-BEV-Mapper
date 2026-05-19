@@ -12,7 +12,9 @@ class BoxFormat(IntFlag):
     XYWH = auto()      # 2
     CLASSES = auto()   # 4
     CONFIDENCE = auto()# 8
-    ALL = XYXY | XYWH | CLASSES | CONFIDENCE 
+    ID = auto()
+    KEYPOINT = auto()
+    ALL = XYXY | XYWH | CLASSES | CONFIDENCE | ID
 
 class EngineManager:
     def __init__(self, type: EngineType, weight_path, using_raw=False):
@@ -47,11 +49,12 @@ class EngineManager:
             # print(results)
             for result in results:
                 boxes = result.boxes
+                keypoints = result.keypoints
                 # print("boxes")
                 # print(boxes)
+
                 if boxes is not None and len(boxes) > 0:
                     # Bitwise checks to see what to include
-
                     if BoxFormat.XYXY in desired_flags:
                         entry['xyxy'] = boxes.xyxy.cpu().numpy().astype(int)
 
@@ -64,5 +67,19 @@ class EngineManager:
 
                     if BoxFormat.CONFIDENCE in desired_flags:
                         entry['confidence'] = boxes.conf.cpu().numpy()
-           
+
+                    # Extract Tracking IDs
+                    if BoxFormat.ID in desired_flags:
+                        if boxes.id is not None:
+                            entry['id'] = boxes.id.int().cpu().numpy()
+                        else:
+                            entry['id'] = [-1] * len(boxes)
+
+                    if BoxFormat.KEYPOINT in desired_flags:
+                        if keypoints is not None:
+                            # x, y coordinates for all 17 points
+                            entry['keypoints_xy'] = keypoints.xy.cpu().numpy() 
+                            # confidence for all 17 points
+                            entry['keypoints_conf'] = keypoints.conf.cpu().numpy()
+
         return entry
