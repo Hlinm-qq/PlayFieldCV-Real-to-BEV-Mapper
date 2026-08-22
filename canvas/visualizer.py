@@ -55,7 +55,7 @@ class Visualizer:
 
 
 class FieldProjector:
-    def __init__(self, src_points, canvas_width, canvas_height, padding=0):
+    def __init__(self, src_points, canvas_width, canvas_height, dst_points=None, padding=0):
         self.width = canvas_width
         self.height = canvas_height
         self.padding = padding
@@ -65,13 +65,14 @@ class FieldProjector:
         # top-right
         # bottom-right
         # bottom-left
-        dst_points = np.float32([
-            [self.padding, self.padding], 
-            [self.width - self.padding, self.padding], 
-            [self.width - self.padding, self.height - self.padding], 
-            [self.padding, self.height - self.padding]
-        ])
-        
+        if dst_points is None:
+            dst_points = np.float32([
+                [self.padding, self.padding], 
+                [self.width - self.padding, self.padding], 
+                [self.width - self.padding, self.height - self.padding], 
+                [self.padding, self.height - self.padding]
+            ])
+
         # Generate the magic matrix once
         self.matrix = cv2.getPerspectiveTransform(src_points, dst_points)
 

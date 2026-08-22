@@ -5,6 +5,8 @@ from engine.engine import *
 from engine.sink import *
 from engine.preprocessor import *
 from engine.postprocessor import *
+from engine.court_detector import *
+from engine.camera_tracker import *
 from data_manager.input_manager import *
 from data_manager.output_manager import *
 from canvas.visualizer import *
@@ -122,9 +124,6 @@ def tracker_pipeline_v0(config: PipelineConfig, device):
         print_boxed_message("Closing streams and windows...")
         stream.close()
         cv2.destroyAllWindows()
-
-        if output_manager.get_is_notebook():
-            cv2.waitKey(1)
         
     return True
 
@@ -222,13 +221,11 @@ def tracker_pipeline_v1(config: PipelineConfig, device):
         print_boxed_message("Closing streams and windows...")
         stream.close()
         cv2.destroyAllWindows()
-
-        if output_manager.get_is_notebook():
-            cv2.waitKey(1)
         
     # Return "finish" flag
     return True
 
+# Bird-eye view MVP
 def tracker_pipeline_v2(config: PipelineConfig, device):
     # Standard COCO 17-Keypoint Skeleton Pairs
     SKELETON_CONNECTIONS = [
@@ -488,10 +485,160 @@ def tracker_pipeline_v2(config: PipelineConfig, device):
         output_manager.close()
         cv2.destroyAllWindows()
 
-        if output_manager.get_is_notebook():
-            cv2.waitKey(1)
-
     return True
+
+# Math based Edge detector Method
+def tracker_pipeline_v3(config: PipelineConfig, device):
+    print_config(config)
+
+    # Scale: 100 pixels = 1 meter
+    # Canvas Size: 1800w x 900h
+    # Center Line X = 900
+    # Left Attack Line X = 600 (900 - 300)
+    # Right Attack Line X = 1200 (900 + 300)
+
+    COURT_ZONES = {
+        "1": {
+            "name": "Full Court (Outer Corners)",
+            "dst_pts": np.array([[0,0], [1800,0], [0,900], [1800,900]], dtype=np.float32)
+        },
+        "2": {
+            "name": "Left Half (Baseline to Center Line)",
+            "dst_pts": np.array([[0,0], [900,0], [0,900], [900,900]], dtype=np.float32)
+        },
+        "3": {
+            "name": "Left Attack Zone (Attack Line to Center Line)",
+            "dst_pts": np.array([[600,0], [900,0], [600,900], [900,900]], dtype=np.float32)
+        },
+        "4": {
+            "name": "Right Attack Zone (Center Line to Right Attack Line)",
+            "dst_pts": np.array([[900,0], [1200,0], [900,900], [1200,900]], dtype=np.float32)
+        },
+        "5": {
+            "name": "Left Back Zone (Left baseline to left attack line)",
+            "dst_pts": np.array([[0, 0], [600, 0], [600, 900], [0, 900]], dtype=np.float32)
+        }
+    }
+
+    # Initialize unified stream reader
+    stream = UnifiedSource(config.source_path)
+    stream.set_max_frame(config.frame_count)
+    is_live_stream = isinstance(config.source_path, int) and config.source_path == 0
+    is_images = True if stream.get_type() != "video" else False
+
+    canvas_w, canvas_h = 1800, 900
+    dst_points = COURT_ZONES["5"].get("dst_pts")
+
+    first_frame = stream.get_first_frame()
+    if config.is_manual_picker:
+        # Set the source reference points
+        point_picker = PointPicker()
+        src_points = point_picker.get_points(first_frame)
+    else:
+        # src_points = np.float32([[305, 373], [995, 376], [1191, 705], [67, 698]])
+        src_points = np.float32([[147, 329], [291, 333], [269, 483], [81, 474]])
+
+    # --- Handlers initialization ---
+    output_manager = OutputManager()
+    court_detector = CourtDetector()
+    # engine_manager = EngineManager(EngineType.ULTRALYTICSYOLO, config.model_path)
+    # projector = FieldProjector(src_points, canvas_w, canvas_h, dst_points, config.map_padding)
+    tracker = CameraTracker(dest_points=dst_points)
+    tracker.initialize(first_frame, src_points)
+
+    # "dst_pts": np.array([[0, 0], [600, 0], [0, 900], [600, 900]], dtype=np.float32)
+    current_H, _ = cv2.findHomography(src_points, dst_points)
+
+    frame_counter = 0
+    try:
+        # --- PIPELINE LOOP ---
+        for frame in stream.get_frame():
+            frame_counter += 1
+            raw_lines = court_detector.supercharged_line_detection(frame)
+
+            if raw_lines is not None:
+                # 2. Ghost Matcher sorts them into buckets
+                categorized_buckets = court_detector.match_lines_to_ghost_court(raw_lines, current_H)
+                
+                # 3. Fit perfect mathematical lines through the buckets
+                final_lines = court_detector.fit_perfect_lines(categorized_buckets)
+                court_detector.debug_draw_fit_lines(frame, final_lines)
+                
+                # 4. Extract the 4 fresh, mathematically perfect corners
+                detected_corner, dst_pts = court_detector.extract_dynamic_corners(final_lines)
+                court_detector.debug_draw_corners(frame, detected_corner)
+                
+                # ==========================================
+                # THE SNAP (Feeding it to the next cycle)
+                # ==========================================
+                # if detected_corner is not None:
+                #     print("Recalibration Successful! Snapping matrix and tracker...")
+                #     print(detected_corner)
+                    
+                #     # A. Update the Homography Matrix directly
+                #     current_H, _ = cv2.findHomography(detected_corner, dst_points)
+                            
+
+
+            # print("raw_lines formatted lines: ")
+            # print(raw_lines)
+            # combined_view = stitch_two_frames(edges, debug_frame)
+
+            # if frame_counter < 11:
+            #     output_manager.save_image(combined_view, 'output', f"lines_{frame_counter}.jpg")
+
+            # H, tracking_ok = tracker.update_matrix(frame)
+
+            # if tracking_ok:
+            #     # footprints = detector.get_footprints(frame)
+            #     # minimap = mapper.draw_minimap(footprints, H)
+                
+            #     # cv2.imshow("Video", frame)
+            #     # cv2.imshow("Full Court Minimap", minimap)
+            #     None
+            # else:
+            #     print("\n[WARNING] Optical Flow lost tracking! Attempting Auto-Recovery...")
+                
+            #     # 1. Ask the CourtDetector to mathematically find the corners
+            #     # We pass it the LAST KNOWN frame to see if it can figure it out
+                
+            #     if recovered_corners is not None and len(recovered_corners) == 4:
+            #         print("[SUCCESS] Hough Lines found the court. Resuming automation.")
+            #         # Re-initialize Lucas-Kanade with these new found points!
+            #         tracker.initialize(frame, recovered_corners)
+            #         continue # Skip mapping players this frame, jump to the next frame
+                    
+            #     else:
+            #         # print("[FAILED] Hough could not confidently find 4 corners.")
+            #         # print("TRIGGERING MANUAL OVERRIDE...")
+                    
+            #         # # If math fails, do not crash! Fall back to the human.
+            #         # # This opens the clicking window we built earlier, using the CURRENT frame.
+            #         # src_pts, dst_pts = initializer.select_zone_and_click(frame)
+                    
+            #         # # Update the tracker's destination scale in case we clicked a new zone
+            #         # tracker.dest_points = dst_pts 
+            #         # tracker.initialize(frame, src_pts)
+            #         continue
+
+            if not output_manager.get_is_notebook():
+                cv2.waitKey(1000 * config.sleep_second)
+            else:
+                time.sleep(config.sleep_second)
+
+    except KeyboardInterrupt:
+        # Catches the Ctrl+C or force-stop
+        print_boxed_message("Force stopped. Cleaning up...")
+        return False
+
+    finally:
+        print_boxed_message("Closing streams and windows...")
+        stream.close()
+        output_manager.close()
+        cv2.destroyAllWindows()
+   
+    return True
+
 
 def main():
     print("PyTorch version:", torch.__version__)
@@ -508,7 +655,7 @@ def main():
     archive_dir = get_path("../dataset")
     pascal_2012_dir = archive_dir / get_path("VOC2012/JPEGImages")
     video_frame_dir = archive_dir / get_path("video_frame/people/images")
-    volley_dir = archive_dir / get_path("volley_ball_2/train/images")
+    volley_dir = archive_dir / get_path("volleyball_3/train/images")
 
     # ==========================================================
     # target_source1 = volley_dir
@@ -525,11 +672,28 @@ def main():
     # is_finished = tracker_pipeline_v1(config_v1, device)
 
     # ==========================================================
-    target_source2 = volley_dir
+    # target_source2 = volley_dir
+    # # target_classes = None
+    # target_classes = [0, 32]
+    # check_path(target_source2)
+    # config = PipelineConfig(source_path=str(target_source2),
+    #                         use_wrapper=True,
+    #                         enable_tracking=False,
+    #                         is_combine_result=True, 
+    #                         save_video=False,
+    #                         map_padding=5, 
+    #                         class_id_filter=target_classes,
+    #                         is_manual_picker=False,
+    #                         frame_count=2, 
+    #                         model_path="yolov8s-pose.pt")
+    # is_finished = tracker_pipeline_v2(config, device)
+
+    # ==========================================================
+    target_source3 = volley_dir
     # target_classes = None
     target_classes = [0, 32]
-    check_path(target_source2)
-    config = PipelineConfig(source_path=str(target_source2),
+    check_path(target_source3)
+    config = PipelineConfig(source_path=str(target_source3),
                             use_wrapper=True,
                             enable_tracking=False,
                             is_combine_result=True, 
@@ -537,9 +701,10 @@ def main():
                             map_padding=5, 
                             class_id_filter=target_classes,
                             is_manual_picker=False,
-                            frame_count=2, 
-                            model_path="yolov8s-pose.pt")
-    is_finished = tracker_pipeline_v2(config, device)
+                            frame_count=5, 
+                            model_path="yolov8s-pose.pt",
+                            sleep_second=5)
+    is_finished = tracker_pipeline_v3(config, device)
 
     return is_finished
 
@@ -553,6 +718,6 @@ if __name__ == "__main__":
     # parent_dir = Path("..") 
     # dataset_dir = parent_dir / "dataset"
 
-    # target_dir = dataset_dir / "volley_ball_2" / "train" / "images"
-    # rename_media(target_dir, "frame", MediaFilter.IMAGES, overwrite=True)
+    # target_dir = dataset_dir / "volleyball_3" / "train" / "images"
+    # rename_media(target_dir, "frame", MediaFilter.IMAGES, overwrite=True, pattern="clip_four*", start_num=427)
     None

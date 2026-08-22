@@ -48,10 +48,10 @@ class MediaFilter(IntFlag):
     TEXTS = auto()   # 4 (0b100)
     ALL = IMAGES | VIDEOS | TEXTS 
 
-def rename_media(directory_path, prefix="", mode=MediaFilter.ALL, start_num=1, overwrite=True):
+def rename_media(directory_path, prefix="", mode=MediaFilter.ALL, start_num=1, overwrite=True, pattern=None):
     """
     Renames files with auto-calculated numerical padding. \n
-    usage: rename_media("my_folder", prefix="media", mode=(ONLY_IMAGES | ONLY_VIDEOS))
+    usage: rename_media("my_folder", prefix="media", mode=(MediaFilter.IMAGES | MediaFilter.VIDEOS))
     """
     print(f"--- Running rename_media ---")
     print(f"Looking at: {directory_path}")
@@ -77,9 +77,11 @@ def rename_media(directory_path, prefix="", mode=MediaFilter.ALL, start_num=1, o
         return
 
     # Gather and sort files
-    files = sorted([f for f in path.iterdir() if f.suffix.lower() in target_extensions])
-    total_files = len(files)
+    search_pattern = pattern if pattern else "*"
+    files = [f for f in path.glob(search_pattern) if f.is_file() and f.suffix.lower() in target_extensions]
+    files.sort()
     
+    total_files = len(files)
     if total_files == 0:
         print("No matching files found.")
         return
@@ -93,12 +95,13 @@ def rename_media(directory_path, prefix="", mode=MediaFilter.ALL, start_num=1, o
 
     if prefix != "":
         prefix += "_"
+    prefix_str = f"{prefix}_" if prefix else ""
 
-    print(f"Mode: {bin(mode)} | Found {len(files)} files. Renaming...")
+    print(f"Mode: {bin(mode)} | Pattern: {search_pattern} | Found {total_files} files.")
     print("--- PREVIEW ---")
     print(f"Directory: {path.absolute()}")
     print(f"Files found: {total_files}")
-    print(f"Example rename: {files[0].name} -> {prefix}{start_num:0{padding}d}{files[0].suffix}")
+    print(f"Example rename: {files[0].name} -> {prefix_str}{start_num:0{padding}d}{files[0].suffix}")
     print("---------------")
 
     confirm = input(f"Proceed renaming {total_files} files? (y/n): ").lower()
@@ -107,14 +110,12 @@ def rename_media(directory_path, prefix="", mode=MediaFilter.ALL, start_num=1, o
         return
 
     for i, file_path in enumerate(files, start=start_num):
-        extension = file_path.suffix
-        
         # Create dynamic format string, e.g., "prefix_0001.jpg"
-        new_name = f"{prefix}{i:0{padding}d}{extension}"
+        new_name = f"{prefix_str}{i:0{padding}d}{file_path.suffix}"
         new_path = path / new_name
         
         if new_path.exists() and new_path != file_path and not overwrite:
-            print(f"Warning: {new_name} already exists. Skipping to avoid overwrite.")
+            print(f"Warning: {new_name} already exists. Skipping.")
             continue
             
         file_path.rename(new_path)
@@ -240,6 +241,19 @@ def stitch_two_frames(img1, img2, bg_color=(40, 40, 40)):
     top and bottom with a background color to perfectly center it.
     bg_color defaults to a sleek dark gray (BGR format).
     """
+    if len(img1.shape) == 2:
+        img1 = cv2.cvtColor(img1, cv2.COLOR_GRAY2BGR)
+    if len(img2.shape) == 2:
+        img2 = cv2.cvtColor(img2, cv2.COLOR_GRAY2BGR)
+
+    if img1.dtype != img2.dtype:
+        img2 = img2.astype(img1.dtype)
+
+    # Debug
+    images_to_concat = [img1, img2]
+    for i, img in enumerate(images_to_concat):
+        print(f"Image {i} -> Shape: {img.shape}, Type: {img.dtype}")
+
     h1, w1 = img1.shape[:2]
     h2, w2 = img2.shape[:2]
 
