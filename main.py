@@ -543,8 +543,8 @@ def tracker_pipeline_v3(config: PipelineConfig, device):
     court_detector = CourtDetector()
     # engine_manager = EngineManager(EngineType.ULTRALYTICSYOLO, config.model_path)
     # projector = FieldProjector(src_points, canvas_w, canvas_h, dst_points, config.map_padding)
-    tracker = CameraTracker(dest_points=dst_points)
-    tracker.initialize(first_frame, src_points)
+    tracker = CameraTracker()
+    tracker.initialize(first_frame, src_points, dst_points)
 
     # "dst_pts": np.array([[0, 0], [600, 0], [0, 900], [600, 900]], dtype=np.float32)
     current_H, _ = cv2.findHomography(src_points, dst_points)
@@ -554,72 +554,44 @@ def tracker_pipeline_v3(config: PipelineConfig, device):
         # --- PIPELINE LOOP ---
         for frame in stream.get_frame():
             frame_counter += 1
-            raw_lines = court_detector.supercharged_line_detection(frame)
+            # print(frame_counter)
 
-            if raw_lines is not None:
-                # 2. Ghost Matcher sorts them into buckets
-                categorized_buckets = court_detector.match_lines_to_ghost_court(raw_lines, current_H)
-                
-                # 3. Fit perfect mathematical lines through the buckets
-                final_lines = court_detector.fit_perfect_lines(categorized_buckets)
-                court_detector.debug_draw_fit_lines(frame, final_lines)
-                
-                # 4. Extract the 4 fresh, mathematically perfect corners
-                detected_corner, dst_pts = court_detector.extract_dynamic_corners(final_lines)
-                court_detector.debug_draw_corners(frame, detected_corner)
-                
-                # ==========================================
-                # THE SNAP (Feeding it to the next cycle)
-                # ==========================================
-                # if detected_corner is not None:
-                #     print("Recalibration Successful! Snapping matrix and tracker...")
-                #     print(detected_corner)
+            # Optical Flow (LK) 
+            lk_matrix, lk_ok = tracker.update_matrix(frame)
+            tracker.debug_draw_lk_tracker(frame, tracker.old_points)
+
+            if lk_ok:
+                current_H = lk_matrix # Continuous tracking
+       
+            if frame_counter % config.recalibration_rate == 0 or not lk_ok:
+                if frame_counter >= (config.recalibration_rate*2):
+                    frame_counter = 0
+
+                raw_lines = court_detector.supercharged_line_detection(frame)
+
+                if raw_lines is not None:
+                    # Ghost Matcher sorts them into buckets
+                    categorized_buckets = court_detector.match_lines_to_ghost_court(raw_lines, current_H)
                     
-                #     # A. Update the Homography Matrix directly
-                #     current_H, _ = cv2.findHomography(detected_corner, dst_points)
+                    # Fit the grouped detected lines 
+                    final_lines = court_detector.fit_perfect_lines(categorized_buckets)
+                    court_detector.debug_draw_fit_lines(frame, final_lines)
+                    
+                    # Extract new detected corners
+                    detected_corner, dst_pts = court_detector.extract_dynamic_corners(final_lines)
+                    court_detector.debug_draw_corners(frame, detected_corner)
+                    
+                    # Feeding to the next cycle
+                    if detected_corner is not None:
+                        # print("Recalibration Successful! Snapping matrix and tracker...")
+                        # print(detected_corner)
+                        
+                        # Update the Homography Matrix back to detected edges
+                        current_H, _ = cv2.findHomography(detected_corner, dst_pts)
+
+                        # Overwrite LK's drifting
+                        tracker.initialize(frame, detected_corner, dst_pts)
                             
-
-
-            # print("raw_lines formatted lines: ")
-            # print(raw_lines)
-            # combined_view = stitch_two_frames(edges, debug_frame)
-
-            # if frame_counter < 11:
-            #     output_manager.save_image(combined_view, 'output', f"lines_{frame_counter}.jpg")
-
-            # H, tracking_ok = tracker.update_matrix(frame)
-
-            # if tracking_ok:
-            #     # footprints = detector.get_footprints(frame)
-            #     # minimap = mapper.draw_minimap(footprints, H)
-                
-            #     # cv2.imshow("Video", frame)
-            #     # cv2.imshow("Full Court Minimap", minimap)
-            #     None
-            # else:
-            #     print("\n[WARNING] Optical Flow lost tracking! Attempting Auto-Recovery...")
-                
-            #     # 1. Ask the CourtDetector to mathematically find the corners
-            #     # We pass it the LAST KNOWN frame to see if it can figure it out
-                
-            #     if recovered_corners is not None and len(recovered_corners) == 4:
-            #         print("[SUCCESS] Hough Lines found the court. Resuming automation.")
-            #         # Re-initialize Lucas-Kanade with these new found points!
-            #         tracker.initialize(frame, recovered_corners)
-            #         continue # Skip mapping players this frame, jump to the next frame
-                    
-            #     else:
-            #         # print("[FAILED] Hough could not confidently find 4 corners.")
-            #         # print("TRIGGERING MANUAL OVERRIDE...")
-                    
-            #         # # If math fails, do not crash! Fall back to the human.
-            #         # # This opens the clicking window we built earlier, using the CURRENT frame.
-            #         # src_pts, dst_pts = initializer.select_zone_and_click(frame)
-                    
-            #         # # Update the tracker's destination scale in case we clicked a new zone
-            #         # tracker.dest_points = dst_pts 
-            #         # tracker.initialize(frame, src_pts)
-            #         continue
 
             if not output_manager.get_is_notebook():
                 cv2.waitKey(1000 * config.sleep_second)
@@ -703,7 +675,8 @@ def main():
                             is_manual_picker=False,
                             frame_count=5, 
                             model_path="yolov8s-pose.pt",
-                            sleep_second=5)
+                            sleep_second=5,
+                            recalibration_rate=2)
     is_finished = tracker_pipeline_v3(config, device)
 
     return is_finished

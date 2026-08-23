@@ -1,42 +1,90 @@
 import cv2
+import numpy as np
 
 class CameraTracker:
-    def __init__(self, dest_points):
-        self.p0 = None
-        self.old_gray = None
-        self.dest_points = dest_points
-        
-        # Lucas-Kanade configuration
+    def __init__(self):
+        # The configuration for the Lucas-Kanade algorithm
+        # winSize: The size of the search window (15x15 pixels)
+        # maxLevel: Uses an image pyramid to handle larger, faster camera movements
         self.lk_params = dict(
-            winSize=(21, 21), 
-            maxLevel=2, 
+            winSize=(15, 15),
+            maxLevel=2,
             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
         )
+        
+        # Memory variables
+        self.old_gray = None
+        self.old_points = None
+        self.base_dst_points = None
 
-    def initialize(self, first_frame, initial_points):
-        self.old_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
-        self.p0 = initial_points
+    def initialize(self, frame, src_points, dst_points):
+        """
+        Recalibrate LK based on current reference state
+        """
+        self.old_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Ensure points are float32, which LK requires
+        self.old_points = src_points.astype(np.float32).reshape(-1, 1, 2)
+        self.base_dst_points = dst_points
 
     def update_matrix(self, current_frame):
-        frame_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-        
-        # Track the points from old_gray to frame_gray
-        p1, status, error = cv2.calcOpticalFlowPyrLK(
-            self.old_gray, frame_gray, self.p0, None, **self.lk_params
+        """
+        Per frame updater to track the pixels and generate a Homography matrix
+        """
+        if self.old_gray is None or self.old_points is None:
+            return None, False
+
+        current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+
+        # Run LUCAS-KANADE (LK)
+        # Returns the new (x,y) locations of tracked points, and a 'status' array 
+        # (status = 1 if it successfully tracked the point, 0 if it lost it)
+        new_points, status, error = cv2.calcOpticalFlowPyrLK(
+            self.old_gray, 
+            current_gray, 
+            self.old_points, 
+            None, 
+            **self.lk_params
         )
+
+        # Keep only the points that LK successfully found in the new frame
+        good_new = new_points[status == 1]
         
-        # Filter out points that Lucas-Kanade lost (status == 0)
-        good_new = p1[status == 1]
-        
-        # Need at least 4 points to calculate a Homography matrix
-        if len(good_new) < 4:
-            return None, False 
+        # Need at least 4 points to calculate Homography
+        if len(good_new) >= 4:
+            # Reformat the array for findHomography
+            good_new = good_new.reshape(-1, 1, 2)
             
-        # Calculate the perspective transformation matrix
-        H, _ = cv2.findHomography(good_new, self.dest_points)
+            # Recalculate homography matrix
+            current_H, _ = cv2.findHomography(good_new, self.base_dst_points)
+
+            # Update memory for the next frame
+            self.old_gray = current_gray.copy()
+            self.old_points = good_new
+
+            return current_H, True
+            
+        else:
+            # LK lost the points
+            return None, False
+
+    def debug_draw_lk_tracker(self, frame, lk_points):
+        """
+        Draws the active Lucas-Kanade tracking points and their 15x15 search windows.
+        """
+        debug_frame = frame.copy()
         
-        # Overwrite the old data with the new data for the NEXT frame loop
-        self.old_gray = frame_gray.copy()
-        self.p0 = good_new.reshape(-1, 1, 2)
+        if lk_points is not None:
+            for pt in lk_points:
+                # Extract the x and y coordinates
+                x, y = int(pt[0][0]), int(pt[0][1])
+                
+                # Draw the center point
+                cv2.circle(debug_frame, (x, y), 4, (255, 0, 255), -1)
+                
+                # Draw the search window LK is using
+                cv2.rectangle(debug_frame, (x - 7, y - 7), (x + 7, y + 7), (0, 255, 0), 1)
+                
+        cv2.imshow("Debug: LK Tracker", debug_frame)
+        cv2.waitKey(1)
         
-        return H, True
+        return debug_frame

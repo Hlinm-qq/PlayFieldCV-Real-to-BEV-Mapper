@@ -1,0 +1,11 @@
+*.ipynb
+*.pt
+*.md
+dump*
+*.pyc
+main_old.py
+*.docx*
+
+/dataset/
+/output/
+/resources/

@@ -40,6 +40,9 @@ class PipelineConfig:
     # Point picker
     is_manual_picker: bool = True
 
+    # Optical Flow settings
+    recalibration_rate: int = 30 # Number of frames to run optical flow before recalibration
+
 # Binary Flags
 class MediaFilter(IntFlag):
     NONE = 0
