@@ -1,11 +1,12 @@
-*.ipynb
 *.pt
 *.md
-dump*
 *.pyc
-main_old.py
+*.ipynb*
+dump*
 *.docx*
 
+.venv/
 /dataset/
 /output/
 /resources/
+__pycache__/

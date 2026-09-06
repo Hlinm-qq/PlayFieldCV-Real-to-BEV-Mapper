@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-class CameraTracker:
+class LKTracker:
     def __init__(self):
         # The configuration for the Lucas-Kanade algorithm
         # winSize: The size of the search window (15x15 pixels)
@@ -88,3 +88,55 @@ class CameraTracker:
         cv2.waitKey(1)
         
         return debug_frame
+
+class DynamicCourtMasker:
+    def __init__(self):
+        self.court_hist = None
+        # Use an elliptical kernel for morphological cleanup
+        self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+
+    def initialize(self, frame, court_corners):
+        """Builds the statistical color profile of the court on Frame 1."""
+        # Convert to HSV space to handle shadows and lighting
+        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        
+        # Create a blank mask, then draw the user's 4 points as a white polygon
+        roi_mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
+        corners_int = np.int32(court_corners).reshape((-1, 1, 2))
+        cv2.fillPoly(roi_mask, [corners_int], 255)
+        
+        # Calculate a 2D histogram using only Hue (color) and Saturation (intensity)
+        # We drop the Value channel so the tracker ignores shadows
+        self.court_hist = cv2.calcHist(
+            [hsv_frame], [0, 1], roi_mask, 
+            [16, 16], [0, 180, 0, 256]
+        )
+        
+        # Normalize to 0-255 for backprojection math
+        cv2.normalize(self.court_hist, self.court_hist, 0, 255, cv2.NORM_MINMAX)
+
+    def get_mask(self, frame):
+        """Generates a binary mask where the court is white, and players are black."""
+        if self.court_hist is None:
+            return np.ones(frame.shape[:2], dtype=np.uint8) * 255
+
+        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        
+        # Backproject: OpenCV assigns a probability (0-255) to every pixel 
+        # based on how closely it matches the Frame 1 histogram
+        back_proj = cv2.calcBackProject(
+            [hsv_frame], [0, 1], self.court_hist, 
+            [0, 180, 0, 256], 1
+        )
+        
+        # Threshold: Only keep pixels that are highly likely to be the floor
+        _, mask = cv2.threshold(back_proj, 50, 255, cv2.THRESH_BINARY)
+        
+        # Morphological Opening: Erase isolated noisy pixels (like a shoe that matched the floor color)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
+        
+        # Morphological Closing: Fill small holes in the floor
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
+        
+        return mask
+

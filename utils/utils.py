@@ -19,7 +19,7 @@ class PipelineConfig:
     # --- Optional ---
     model_path: str = 'yolov8n.pt'
     frame_count: int = 2
-    sleep_second: int = 2
+    sleep_second: int = 0 # Additional delay per-frame (for Debug)
     
     # video_handle: Optional[Any] = None
     target_fps: int = 0
@@ -35,6 +35,7 @@ class PipelineConfig:
     is_combine_result: bool = False
     save_video: bool = False
     map_padding: int = 0
+    map_orientation: str = "horizontal"
     class_id_filter: list = None
     
     # Point picker
@@ -42,6 +43,9 @@ class PipelineConfig:
 
     # Optical Flow settings
     recalibration_rate: int = 30 # Number of frames to run optical flow before recalibration
+
+    # default fallback
+    default_fps: int = 30
 
 # Binary Flags
 class MediaFilter(IntFlag):
@@ -254,6 +258,7 @@ def stitch_two_frames(img1, img2, bg_color=(40, 40, 40)):
 
     # Debug
     images_to_concat = [img1, img2]
+    print("Start Image stiching...")
     for i, img in enumerate(images_to_concat):
         print(f"Image {i} -> Shape: {img.shape}, Type: {img.dtype}")
 

@@ -27,7 +27,7 @@ class EngineManager:
         Load model to be used as the Inference Engine (Brain)
         """
         model = None
-        if type == EngineType.ULTRALYTICSYOLO:
+        if self.engine_type == EngineType.ULTRALYTICSYOLO:
             if is_raw:
                 model = YOLO(self.weight_path).model
                 model.eval()

@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-class CourtDetector:
+class HoughDetector:
     def __init__(self):
         self.lower_color = np.array([0, 0, 200]) 
         self.upper_color = np.array([180, 50, 255])

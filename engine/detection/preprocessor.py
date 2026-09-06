@@ -34,7 +34,6 @@ class Preprocessor:
         top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
         left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
         
-        # 114 is the standard "gray" value used by YOLO to indicate empty space 
         im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
 
         # Color conversion
