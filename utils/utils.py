@@ -30,6 +30,7 @@ class PipelineConfig:
     # Ultralytics
     use_wrapper: bool = False
     enable_tracking: bool = False
+    is_run_detect: bool = True
 
     # Output Options
     is_combine_result: bool = False

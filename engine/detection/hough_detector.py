@@ -143,12 +143,12 @@ class HoughDetector:
 
         b, g, r = cv2.split(roi_frame)
         gray = b
-        cv2.imshow("gray", gray)
+        # cv2.imshow("gray", gray)
 
         # Apply CLAHE to force the lines to pop out of shadows
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced_gray = clahe.apply(gray)
-        cv2.imshow("enhanced_gray", enhanced_gray)
+        # cv2.imshow("enhanced_gray", enhanced_gray)
 
         # Thresholding (Instead of HSV, we can use Adaptive Thresholding on the enhanced gray)
         mask = cv2.adaptiveThreshold(
@@ -156,7 +156,7 @@ class HoughDetector:
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
             cv2.THRESH_BINARY, 15, -5
         )
-        cv2.imshow("adaptiveThreshold", mask)
+        # cv2.imshow("adaptiveThreshold", mask)
 
         # MORPHOLOGICAL CLOSING
         # Create a 5x5 structural element (a small block of pixels)
@@ -164,26 +164,26 @@ class HoughDetector:
 
         # Close the gaps caused by players walking on the lines
         closed_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        cv2.imshow("closed_mask", closed_mask)
+        # cv2.imshow("closed_mask", closed_mask)
 
         
         # Erode noise (removes tiny white dots like reflections on shoes)
         clean_mask = cv2.erode(closed_mask, np.ones((3, 3), np.uint8), iterations=1)
-        cv2.imshow("clean_mask", clean_mask)
+        # cv2.imshow("clean_mask", clean_mask)
 
         # # Apply the Floor Stencil: Only keep white lines that are ON the floor!
         # clean_floor_lines = cv2.bitwise_and(clean_mask, clean_mask, mask=floor_mask)
         # cv2.imshow("clean_floor_lines", clean_floor_lines)
 
         blurred_mask = cv2.GaussianBlur(clean_mask, (5, 5), 0)
-        cv2.imshow("closed_mask", blurred_mask)
+        # cv2.imshow("closed_mask", blurred_mask)
 
         # Dynamic Canny Thresholding based on image median
         v = np.median(blurred_mask)
         lower_thresh = int(max(0, (1.0 - 0.33) * v))
         upper_thresh = int(min(255, (1.0 + 0.33) * v))
         edges = cv2.Canny(blurred_mask, lower_thresh, upper_thresh)
-        cv2.imshow("edges", edges)
+        # cv2.imshow("edges", edges)
         
         raw_lines = cv2.HoughLinesP(
             edges, 
@@ -203,8 +203,8 @@ class HoughDetector:
         formatted_lines = raw_lines
         debug_frame = frame.copy()
 
-        master_h, master_v = self.merge_overlapping_lines(formatted_lines, distance_threshold=15)
-        self.debug_draw_master_lines(debug_frame, master_h, master_v)
+        # master_h, master_v = self.merge_overlapping_lines(formatted_lines, distance_threshold=15)
+        # self.debug_draw_master_lines(debug_frame, master_h, master_v)
 
         if formatted_lines is None:
             return None
@@ -624,7 +624,7 @@ class HoughDetector:
     def extract_dynamic_corners(self, final_court_lines):
         """
         Looks at the available lines, determines the visible zone, 
-        and returns both the camera points and the 2D canvas points.
+        and returns both the camera points and the 2D canvas points
         """
         keys = final_court_lines.keys()
 
@@ -680,3 +680,34 @@ class HoughDetector:
         dst_pts = np.array(dst_pts_list, dtype=np.float32).reshape(-1, 1, 2)
 
         return src_pts, dst_pts
+
+    def detect(self, frame, current_H):
+        raw_lines = self.supercharged_line_detection(frame)
+
+        if raw_lines is not None:
+            # Ghost Matcher sorts them into buckets
+            categorized_buckets = self.match_lines_to_ghost_court(raw_lines, current_H)
+            
+            # Fit the grouped detected lines 
+            final_lines = self.fit_perfect_lines(categorized_buckets)
+            self.debug_draw_fit_lines(frame, final_lines)
+            
+            # Extract new detected corners
+            detected_corner, dst_pts = self.extract_dynamic_corners(final_lines)
+            self.debug_draw_corners(frame, detected_corner)
+            
+            # Feeding to the next cycle
+            if detected_corner is not None:
+                try:
+                    src_pts32 = np.array(detected_corner, dtype=np.float32)
+                    dst_pts32 = np.array(dst_pts, dtype=np.float32)
+                    # Update the Homography Matrix back to detected edges
+                    # current_H, _ = cv2.findHomography(detected_corner, dst_pts)
+                    new_H = cv2.getPerspectiveTransform(src_pts32, dst_pts32)
+
+                    return new_H, src_pts32
+                except cv2.error as e:
+                    print(f"OpenCV Error caught: {e}")
+
+        return None, None
+        

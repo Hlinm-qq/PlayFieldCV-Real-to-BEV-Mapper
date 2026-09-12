@@ -3,69 +3,98 @@ import numpy as np
 
 class LKTracker:
     def __init__(self):
-        # The configuration for the Lucas-Kanade algorithm
-        # winSize: The size of the search window (15x15 pixels)
-        # maxLevel: Uses an image pyramid to handle larger, faster camera movements
-        self.lk_params = dict(
-            winSize=(15, 15),
-            maxLevel=2,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
-        )
-        
-        # Memory variables
+        self.lk_params = dict(winSize=(15, 15), maxLevel=2,
+                              criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+        self.feature_params = dict(maxCorners=100, qualityLevel=0.1, minDistance=25, blockSize=7)
         self.old_gray = None
-        self.old_points = None
-        self.base_dst_points = None
+        self.tracked_features = None
+        self.corner_pixels = None     # The 4 main court corners in pixel space
+        self.base_dst_points = None   # The 2D bird's-eye view coordinates
 
-    def initialize(self, frame, src_points, dst_points):
-        """
-        Recalibrate LK based on current reference state
-        """
+    def initialize(self, frame, src_corners, dst_points, initial_mask):
+        """Called at Frame 1"""
         self.old_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # Ensure points are float32, which LK requires
-        self.old_points = src_points.astype(np.float32).reshape(-1, 1, 2)
+        self.corner_pixels = src_corners.astype(np.float32).reshape(-1, 1, 2)
         self.base_dst_points = dst_points
+        
+        # Find 100 strong points to track instead of just the 4 corners
+        self.tracked_features = cv2.goodFeaturesToTrack(self.old_gray, mask=initial_mask, **self.feature_params)
 
-    def update_matrix(self, current_frame):
-        """
-        Per frame updater to track the pixels and generate a Homography matrix
-        """
-        if self.old_gray is None or self.old_points is None:
+        term_crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        self.tracked_features = cv2.cornerSubPix(self.old_gray, self.tracked_features, (5, 5), (-1, -1), term_crit)
+
+    def reset_points(self, frame, new_hough_corners, safe_floor_mask):
+        """Called by the Facade when Hough takes over to rescue the tracker."""
+        self.old_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Overwrite the drifted corners with the newly detected Hough corners
+        self.corner_pixels = new_hough_corners.astype(np.float32).reshape(-1, 1, 2)
+
+        # Respawn the tracking points based on the new reality
+        self.tracked_features = cv2.goodFeaturesToTrack(
+            self.old_gray, mask=safe_floor_mask, **self.feature_params
+        )
+
+        term_crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        self.tracked_features = cv2.cornerSubPix(self.old_gray, self.tracked_features, (5, 5), (-1, -1), term_crit)
+
+    def update_matrix(self, current_frame, safe_floor_mask):
+        """Called every frame"""
+        if self.old_gray is None or self.tracked_features is None:
             return None, False
-
+        
         current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
 
-        # Run LUCAS-KANADE (LK)
-        # Returns the new (x,y) locations of tracked points, and a 'status' array 
-        # (status = 1 if it successfully tracked the point, 0 if it lost it)
-        new_points, status, error = cv2.calcOpticalFlowPyrLK(
-            self.old_gray, 
-            current_gray, 
-            self.old_points, 
-            None, 
-            **self.lk_params
+        # 1. Run standard optical flow (No mask used here)
+        new_features, status, _ = cv2.calcOpticalFlowPyrLK(
+            self.old_gray, current_gray, self.tracked_features, None, **self.lk_params
         )
 
-        # Keep only the points that LK successfully found in the new frame
-        good_new = new_points[status == 1]
+        good_new = new_features[status == 1]
+        good_old = self.tracked_features[status == 1]
+
+        # 2. MASK VALIDATION: Drop any points that walked onto players
+        validated_new, validated_old = [], []
+        height, width = safe_floor_mask.shape
         
-        # Need at least 4 points to calculate Homography
-        if len(good_new) >= 4:
-            # Reformat the array for findHomography
-            good_new = good_new.reshape(-1, 1, 2)
-            
-            # Recalculate homography matrix
-            current_H, _ = cv2.findHomography(good_new, self.base_dst_points)
+        for new_pt, old_pt in zip(good_new, good_old):
+            x, y = int(new_pt[0]), int(new_pt[1])
+            # Check bounds, then check if the mask pixel is white (> 0)
+            if 0 <= y < height and 0 <= x < width:
+                if safe_floor_mask[y, x] > 0:  
+                    validated_new.append(new_pt)
+                    validated_old.append(old_pt)
 
-            # Update memory for the next frame
-            self.old_gray = current_gray.copy()
-            self.old_points = good_new
+        validated_new = np.array(validated_new, dtype=np.float32).reshape(-1, 1, 2)
+        validated_old = np.array(validated_old, dtype=np.float32).reshape(-1, 1, 2)
 
-            return current_H, True
-            
-        else:
-            # LK lost the points
+        # Calculate LK Health (How many points survived the mask purge?)
+        lk_health = len(validated_new) / max(1, len(self.tracked_features))
+        if lk_health < 0.30 or len(validated_new) < 10:
+            return None, lk_health # Tell CourtTracker to fallback to Hough
+
+        # 3. Calculate camera delta and update court corners
+        delta_H, _ = cv2.findHomography(validated_old, validated_new, cv2.RANSAC, 2.0)
+
+        if delta_H is None:
             return None, False
+
+        # 4. Apply the camera movement to our 4 invisible court corners
+        self.corner_pixels = cv2.perspectiveTransform(self.corner_pixels, delta_H)
+        # 5. Calculate the final matrix using the newly moved corners and the 2D map
+        current_H, _ = cv2.findHomography(self.corner_pixels, self.base_dst_points)
+
+        # 4. MASK SPAWNER: Replenish points strictly inside the white mask
+        self.old_gray = current_gray.copy()
+        # Refresh the 100 tracked features so we don't run out of points over time
+        self.tracked_features = cv2.goodFeaturesToTrack(
+            self.old_gray, mask=safe_floor_mask, **self.feature_params
+        )
+
+        term_crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        self.tracked_features = cv2.cornerSubPix(self.old_gray, self.tracked_features, (5, 5), (-1, -1), term_crit)
+
+        return current_H, lk_health
 
     def debug_draw_lk_tracker(self, frame, lk_points):
         """

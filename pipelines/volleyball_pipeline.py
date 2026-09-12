@@ -1,38 +1,61 @@
 import cv2
 import numpy as np
+from dataclasses import field
 
-COURT_ZONES = {
-    # Top-Left, Top-Right, Bottom-Right, Bottom-Left
-    "1": {
-        "name": "Full Court (Outer Corners)",
-        "dst_pts": np.array([[0,0], [1800,0], [1800,900], [0,900]], dtype=np.float32)
-    },
-    "2": {
-        "name": "Left Half (Baseline to Center Line)",
-        "dst_pts": np.array([[0,0], [900,0], [900,900], [0,900]], dtype=np.float32)
-    },
-    "3": {
-        "name": "Left Attack Zone (Attack Line to Center Line)",
-        "dst_pts": np.array([[600,0], [900,0], [900,900], [600,900]], dtype=np.float32)
-    },
-    "4": {
-        "name": "Right Attack Zone (Center Line to Right Attack Line)",
-        "dst_pts": np.array([[900,0], [1200,0], [1200,900], [900,900]], dtype=np.float32)
-    },
-    "5": {
-        "name": "Left Back Zone (Left baseline to left attack line)",
-        "dst_pts": np.array([[0, 0], [600, 0], [600, 900], [0, 900]], dtype=np.float32)
-    },
-    "6": {
-        "name": "Right Back Zone (Right attack line to right baseline)",
-        "dst_pts": np.array([[1200, 0], [1800, 0], [1800, 900], [1200, 900]], dtype=np.float32)
-    }
-}
+from engine.tracker.court_tracker import *
+from engine.detection.yolo_engine import *
+
+from canvas.visualizer import FieldProjector
+
+from data_manager.dataclass import *
+from utils.utils import *
 
 class VolleyballPipeline:
-    def __int__(self, court_engine, detector_engine):
+    def __init__(self, court_engine: CourtTracker, detector_engine: EngineManager, mapper_handler: FieldProjector, run_detect: bool = True):
         self.court = court_engine
         self.detector = detector_engine
+        self.mapper = mapper_handler
+        self.run_detect = run_detect
 
-    def process_frame(self, frame):
-        None
+    def initialize(self, frame, src_corners, map_dst_points):
+        self.court.initialize(frame, src_corners, map_dst_points)
+
+    def process_frame(self, frame: np.ndarray, frame_idx: int) -> FrameResult:
+        # metrics = FrameMetrics()
+        detected_players = []
+
+        # Update Court Matrix
+        current_H, debug_mask = self.court.update(frame, frame_idx)
+
+        if (self.run_detect):
+            # Run Object Detection
+            results = self.detector.detect(frame)
+            detections = dict_to_list(results)
+
+            # Map Player Coordinates
+            for det in detections:
+                x1, y1, x2, y2 = det["xyxy"]
+                new_bbox = BBox(x1, y1, x2, y2)
+
+                # Calculate foot coordinate (bottom center of bounding box)
+                src_coords = new_bbox.bottom_center
+
+                # map_x, map_y = self.mapper.get_map_coordinate(foot_x, foot_y, current_H)
+                map_x, map_y = self.mapper.get_map_coordinate(src_coords.x, src_coords.y, current_H)
+                map_coords = Vector2D(map_x, map_y)
+
+                found_player = PlayerDetection(
+                    track_id=-1, 
+                    bbox=new_bbox, 
+                    src_px=src_coords, 
+                    map_px=map_coords, 
+                    confidence=0.0
+                )
+                detected_players.append(found_player)
+
+        # Package outputs
+        return FrameResult(
+            players=detected_players,
+            homography_matrix=current_H,
+            floor_mask=debug_mask
+        )

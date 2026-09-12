@@ -1,16 +1,24 @@
 import time
 
-from utils.utils import *
 from engine.detection.yolo_engine import *
-from engine.tracker.deepsort_engine import *
 from engine.detection.preprocessor import *
 from engine.detection.postprocessor import *
 from engine.detection.hough_detector import *
 from engine.tracker.lk_tracker import *
+from engine.tracker.deepsort_engine import *
+from engine.tracker.court_tracker import *
+
 from data_manager.input_manager import *
 from data_manager.output_manager import *
+from data_manager.dataclass import *
+
 from canvas.visualizer import *
 from canvas.canvas_utils import *
+
+from pipelines.volleyball_pipeline import VolleyballPipeline
+
+from utils.utils import *
+from config.volleyball import *
 
 def tracker_pipeline_v0(config: PipelineConfig, device):
     # Initialize unified stream reader
@@ -34,9 +42,9 @@ def tracker_pipeline_v0(config: PipelineConfig, device):
     target_frame_time = (1.0 / target_fps) if target_fps > 0 else 0
 
     if config.use_wrapper:
-        model = engine_manager.load_model(EngineType.ULTRALYTICSYOLO)
+        model = engine_manager.load_model()
     else:
-        model = engine_manager.load_model(EngineType.ULTRALYTICSYOLO, is_raw=True)
+        model = engine_manager.load_model(is_raw=True)
     model.to(device)
     # print(model.device)
 
@@ -150,7 +158,7 @@ def tracker_pipeline_v1(config: PipelineConfig, device):
     # Calculate the sleep target
     target_frame_time = (1.0 / target_fps) if target_fps > 0 else 0
 
-    model = engine_manager.load_model(EngineType.ULTRALYTICSYOLO, is_raw=True)
+    model = engine_manager.load_model(is_raw=True)
     model.to(device)
 
     try:
@@ -235,7 +243,7 @@ def tracker_pipeline_v2(config: PipelineConfig, device):
         (11, 13), (13, 15), (12, 14), (14, 16)    # Legs
     ]
 
-    COURT_ZONES = {
+    COURT_ZONES_DICT = {
             "1": {
                 "name": "Full Court (Outer Corners)",
                 "dst_pts": np.array([[0,0], [1800,0], [0,900], [1800,900]], dtype=np.float32)
@@ -283,7 +291,7 @@ def tracker_pipeline_v2(config: PipelineConfig, device):
         src_points = np.float32([[147, 329], [291, 333], [269, 483], [81, 474]])
 
     frame_stats = get_frame_stats(first_frame)
-    dst_points = COURT_ZONES["5"].get("dst_pts")
+    dst_points = COURT_ZONES_DICT["5"].get("dst_pts")
 
     if len(src_points) != 4:
         raise ValueError(f"Expected 4 points for 'src_points', but got {len(src_points)}")
@@ -309,9 +317,9 @@ def tracker_pipeline_v2(config: PipelineConfig, device):
     target_frame_time = (1.0 / target_fps) if target_fps > 0 else 0
 
     if config.use_wrapper:
-        model = engine_manager.load_model(EngineType.ULTRALYTICSYOLO)
+        model = engine_manager.load_model()
     else:
-        model = engine_manager.load_model(EngineType.ULTRALYTICSYOLO, is_raw=True)
+        model = engine_manager.load_model(is_raw=True)
     model.to(device)
 
     if config.save_video and config.frame_count > 5:
@@ -545,7 +553,7 @@ def tracker_pipeline_v2_nonpose(config: PipelineConfig, device):
     # Handler
     tracker = SORTTracker()
     output_manager = OutputManager()
-    engine_manager = EngineManager(EngineType.ULTRALYTICSYOLO, config.model_path)
+    engine_manager = EngineManager(EngineType.ULTRALYTICSYOLO, config.model_path, config.use_wrapper)
     visualizer = Visualizer(canvas_w, canvas_h, config.map_padding)
     content_size = visualizer.get_content_size()
     projector = FieldProjector(src_points, canvas_w, canvas_h, config.map_padding)
@@ -560,9 +568,9 @@ def tracker_pipeline_v2_nonpose(config: PipelineConfig, device):
     target_frame_time = (1.0 / target_fps) if target_fps > 0 else 0
 
     if config.use_wrapper:
-        model = engine_manager.load_model(EngineType.ULTRALYTICSYOLO)
+        model = engine_manager.load_model()
     else:
-        model = engine_manager.load_model(EngineType.ULTRALYTICSYOLO, is_raw=True)
+        model = engine_manager.load_model(is_raw=True)
     model.to(device)
 
     if config.save_video and config.frame_count > 5:
@@ -709,7 +717,7 @@ def tracker_pipeline_v3(config: PipelineConfig, device):
     # Left Attack Line X = 600 (900 - 300)
     # Right Attack Line X = 1200 (900 + 300)
 
-    COURT_ZONES = {
+    COURT_ZONES_DICT = {
         "1": {
             "name": "Full Court (Outer Corners)",
             "dst_pts": np.array([[0,0], [1800,0], [0,900], [1800,900]], dtype=np.float32)
@@ -739,7 +747,7 @@ def tracker_pipeline_v3(config: PipelineConfig, device):
     is_images = True if stream.get_type() != "video" else False
 
     canvas_w, canvas_h = 1800, 900
-    dst_points = COURT_ZONES["5"].get("dst_pts")
+    dst_points = COURT_ZONES_DICT["5"].get("dst_pts")
 
     first_frame = stream.get_first_frame()
     if config.is_manual_picker:
@@ -759,7 +767,7 @@ def tracker_pipeline_v3(config: PipelineConfig, device):
     # --- Handlers initialization ---
     output_manager = OutputManager()
     court_detector = HoughDetector()
-    engine_manager = EngineManager(EngineType.ULTRALYTICSYOLO, config.model_path)
+    engine_manager = EngineManager(EngineType.ULTRALYTICSYOLO, config.model_path, config.use_wrapper, device)
     projector = FieldProjector(src_points, canvas_w, canvas_h, dst_points, config.map_padding)
     visualizer = Visualizer(canvas_w, canvas_h, config.map_padding, config.map_orientation)
     tracker = LKTracker()
@@ -943,6 +951,135 @@ def tracker_pipeline_v3(config: PipelineConfig, device):
    
     return True
 
+def flow4(config: PipelineConfig, device):
+    stream = UnifiedSource(config.source_path)
+    stream.set_max_frame(config.frame_count)
+    is_live_stream = isinstance(config.source_path, int) and config.source_path == 0
+    is_images = stream.get_type() != "video"
+
+    canvas_w, canvas_h = COURT_WIDTH, COURT_LENGTH
+    dst_points = COURT_ZONES["5"].get("dst_pts")
+
+    # Get first frame for calibration
+    first_frame = stream.get_first_frame()
+    if first_frame is None:
+        raise ValueError("Failed to read the first frame from the source.")
+
+    # Get source corners
+    if config.is_manual_picker:
+        point_picker = PointPicker()
+        src_points = point_picker.get_points(first_frame)
+    else:
+        src_points = DEFAULT_SRC_POINTS
+
+    output_manager = OutputManager()
+    court_detector = CourtTracker(0.15, config.recalibration_rate)
+    yolo_engine = EngineManager(EngineType.ULTRALYTICSYOLO, config.model_path, config.use_wrapper, device)
+    projector = FieldProjector(src_points, canvas_w, canvas_h, dst_points, config.map_padding)
+    visualizer = Visualizer(canvas_w, canvas_h, config.map_padding, config.map_orientation)
+    pipeline = VolleyballPipeline(court_detector, yolo_engine, projector, run_detect=config.is_run_detect)
+
+    pipeline.initialize(first_frame, src_points, dst_points)
+
+    # Determine target FPS
+    default_fps = config.default_fps if config.default_fps > 0 else 30
+    target_fps = config.target_fps
+    if not is_images:
+        # Acquire the stream FPS
+        target_fps = stream.get_fps()
+    target_fps = target_fps if target_fps > 0 else default_fps
+
+    # Calculate sleep target
+    target_frame_time = (1.0 / target_fps)
+
+    frame_stats = get_frame_stats(first_frame)
+    if config.save_video and config.frame_count > 5:
+        if config.is_combine_result:
+            video_width = frame_stats['Dimensions'][0] + canvas_w
+            video_height = max(frame_stats['Dimensions'][1], canvas_h)
+        
+            output_video_fps = target_fps
+            if target_fps <= 0:
+                output_video_fps = config.sleep_second
+            # Initialize video writer
+            output_manager.init_video_writer(output_video_fps, video_width, video_height)
+
+    try:
+        for frame_idx, frame in enumerate(stream.get_frame()):
+            loop_start = time.perf_counter()
+            loop_start_time = time.time()
+
+            # Pass frame -> Pipeline updates its internal state -> Returns results
+            result = pipeline.process_frame(frame, frame_idx)
+            court_detector.debug_draw_lk_mask(frame, result.floor_mask)
+
+            # Measures total loop latency
+            total_loop_ms = (time.perf_counter() - loop_start) * 1000
+            process_time = time.time() - loop_start_time
+
+            # Render outputs
+            canvas = visualizer.draw_empty_court()
+            for p in result.players:
+                cv2.rectangle(frame, (int(p.bbox.x1), int(p.bbox.y1)), (int(p.bbox.x2), int(p.bbox.y2)), (0, 0, 255), 2)
+                cv2.circle(frame, (int(p.src_px.x), int(p.src_px.y)), 5, (255, 0, 0), -1)
+
+                visualizer.draw_player_on_map(canvas, p.map_px.x, p.map_px.y, -1)
+
+            # Display telemetry
+            print(f"Frame {frame_idx} | "
+                  f"Total FPS: {1000/total_loop_ms:.1f}")
+
+            # Throttle, short delay to match target FPS, if applicable
+            if target_frame_time > 0 and process_time < target_frame_time:
+                sleep_amount = target_frame_time - process_time
+                time.sleep(sleep_amount)
+
+            # Calculate real final FPS
+            total_loop_time = time.time() - loop_start_time
+            actual_fps = 1.0 / total_loop_time if total_loop_time > 0 else 0
+                    
+            # Draw telemetry on screen
+            cv2.putText(frame, f"Target FPS: {target_fps if target_fps > 0 else 'MAX'}", 
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            cv2.putText(frame, f"Actual FPS: {int(actual_fps)}", 
+                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            print(f"Target FPS: {target_fps if target_fps > 0 else 'MAX'}")
+            print(f"Actual FPS: {int(actual_fps)}")
+
+            if config.is_combine_result:
+                # Glue the two images together horizontally
+                combined_view = stitch_two_frames(frame, canvas)
+                print(get_frame_stats(combined_view))
+                # combined_view = cv2.resize(combined_view, (1500, 700)) 
+            
+            # Display result
+            if not config.is_combine_result:
+                key_pressed = output_manager.display_frame(frame, "Original Detection")
+                key_pressed2 = output_manager.display_frame(canvas, "2D Map")
+                if key_pressed == ord('q'): break
+                if key_pressed2 == ord('q'): break
+            else:
+                key_pressed = output_manager.display_frame(combined_view, "Combined Output")
+                if key_pressed == ord('q'): break
+
+            if not output_manager.get_is_notebook():
+                cv2.waitKey(1000 * config.sleep_second)
+            else:
+                time.sleep(config.sleep_second)
+    
+    except KeyboardInterrupt:
+        # Catches the Ctrl+C or force-stop
+        print_boxed_message("Force stopped. Cleaning up...")
+        return False
+
+    finally:
+        print_boxed_message("Closing streams and windows...")
+        stream.close()
+        output_manager.close()
+        cv2.destroyAllWindows()
+
+    return True
+
 def main():
     print("PyTorch version:", torch.__version__)
     print("CUDA available:", torch.cuda.is_available())
@@ -1004,12 +1141,14 @@ def main():
                             map_padding=5, 
                             class_id_filter=target_classes,
                             is_manual_picker=False,
-                            frame_count=5, 
+                            frame_count=10, 
                             model_path="yolov8s.pt",
                             sleep_second=5,
                             map_orientation="vertical",
+                            is_run_detect=False,
                             recalibration_rate=2)
-    is_finished = tracker_pipeline_v3(config, device)
+    # is_finished = tracker_pipeline_v3(config, device)
+    is_finished = flow4(config, device)
 
     return is_finished
 
