@@ -705,9 +705,9 @@ class HoughDetector:
                     # current_H, _ = cv2.findHomography(detected_corner, dst_pts)
                     new_H = cv2.getPerspectiveTransform(src_pts32, dst_pts32)
 
-                    return new_H, src_pts32
+                    return new_H, src_pts32, dst_pts32
                 except cv2.error as e:
                     print(f"OpenCV Error caught: {e}")
 
-        return None, None
+        return None, None, None
         

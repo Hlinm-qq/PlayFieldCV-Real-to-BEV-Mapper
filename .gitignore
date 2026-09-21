@@ -4,6 +4,7 @@
 *.ipynb*
 dump*
 *.docx*
+*tool*.py
 
 .venv/
 /dataset/

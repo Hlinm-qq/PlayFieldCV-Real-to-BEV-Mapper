@@ -28,7 +28,7 @@ class CourtTracker:
 
     def update(self, frame, frame_idx):
         if self.current_matrix is None: 
-            return None
+            return None, None, None, None
 
         new_matrix = None
         lk_health = 1.0
@@ -38,23 +38,33 @@ class CourtTracker:
 
         # Pass the frame AND the mask to the optical flow engine
         new_matrix, lk_health = self.lk.update_matrix(frame, safe_floor_mask)
+        detected_corners = None
+        dst_pts = None
 
         # Fallback to Hough if LK health is low (camera blurred, etc.)
         if lk_health < 0.50 or frame_idx % self.hough_interval == 0:
             # print(f"Hough calibrated")
-            hough_matrix, hough_corners = self.hough.detect(frame, self.current_matrix)
+            hough_matrix, hough_corners, dst_pts32 = self.hough.detect(frame, self.current_matrix)
+            detected_corners = hough_corners
+            dst_pts = dst_pts32
 
             if self._is_matrix_valid(hough_matrix):
                 new_matrix = hough_matrix
+
+                # Retrain color mask on the new detected area
+                self.masker.recalibrate(frame, hough_corners)
+
                 # Reset LK points to the new Hough lines
-                self.lk.reset_points(frame, hough_corners, safe_floor_mask) 
+                new_mask = self.masker.get_mask(frame)
+                self.lk.reset_points(frame, hough_corners, new_mask) 
 
         # If LK failed and Hough failed, freeze the matrix
         if not self._is_matrix_valid(new_matrix):
-            return self.current_matrix, safe_floor_mask
+            return self.current_matrix, safe_floor_mask, detected_corners, dst_pts
         
-        self.current_matrix = self._apply_ema(new_matrix)
-        return self.current_matrix, safe_floor_mask
+        # self.current_matrix = self._apply_ema(new_matrix)
+        self.current_matrix = new_matrix
+        return self.current_matrix, safe_floor_mask, detected_corners, dst_pts
 
     def _is_matrix_valid(self, matrix):
         """Mathematical guardrail to prevent tracking collapse"""

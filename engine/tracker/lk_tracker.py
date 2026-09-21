@@ -24,7 +24,7 @@ class LKTracker:
         self.tracked_features = cv2.cornerSubPix(self.old_gray, self.tracked_features, (5, 5), (-1, -1), term_crit)
 
     def reset_points(self, frame, new_hough_corners, safe_floor_mask):
-        """Called by the Facade when Hough takes over to rescue the tracker."""
+        """Called when Hough takes over to fix the tracker."""
         self.old_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         # Overwrite the drifted corners with the newly detected Hough corners
@@ -45,7 +45,7 @@ class LKTracker:
         
         current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
 
-        # 1. Run standard optical flow (No mask used here)
+        # Run standard optical flow
         new_features, status, _ = cv2.calcOpticalFlowPyrLK(
             self.old_gray, current_gray, self.tracked_features, None, **self.lk_params
         )
@@ -53,7 +53,7 @@ class LKTracker:
         good_new = new_features[status == 1]
         good_old = self.tracked_features[status == 1]
 
-        # 2. MASK VALIDATION: Drop any points that walked onto players
+        # MASK VALIDATION: Drop any points that walked onto players
         validated_new, validated_old = [], []
         height, width = safe_floor_mask.shape
         
@@ -68,25 +68,23 @@ class LKTracker:
         validated_new = np.array(validated_new, dtype=np.float32).reshape(-1, 1, 2)
         validated_old = np.array(validated_old, dtype=np.float32).reshape(-1, 1, 2)
 
-        # Calculate LK Health (How many points survived the mask purge?)
+        # Calculate LK Health
         lk_health = len(validated_new) / max(1, len(self.tracked_features))
         if lk_health < 0.30 or len(validated_new) < 10:
-            return None, lk_health # Tell CourtTracker to fallback to Hough
+            return None, lk_health 
 
-        # 3. Calculate camera delta and update court corners
+        # Calculate camera delta and update court corners
         delta_H, _ = cv2.findHomography(validated_old, validated_new, cv2.RANSAC, 2.0)
 
         if delta_H is None:
             return None, False
 
-        # 4. Apply the camera movement to our 4 invisible court corners
+        # Apply the camera movement to 4 invisible court corners
         self.corner_pixels = cv2.perspectiveTransform(self.corner_pixels, delta_H)
-        # 5. Calculate the final matrix using the newly moved corners and the 2D map
+        # Calculate the final matrix using the newly moved corners and the 2D map
         current_H, _ = cv2.findHomography(self.corner_pixels, self.base_dst_points)
 
-        # 4. MASK SPAWNER: Replenish points strictly inside the white mask
         self.old_gray = current_gray.copy()
-        # Refresh the 100 tracked features so we don't run out of points over time
         self.tracked_features = cv2.goodFeaturesToTrack(
             self.old_gray, mask=safe_floor_mask, **self.feature_params
         )
@@ -98,7 +96,7 @@ class LKTracker:
 
     def debug_draw_lk_tracker(self, frame, lk_points):
         """
-        Draws the active Lucas-Kanade tracking points and their 15x15 search windows.
+        Draws the active Lucas-Kanade tracking points.
         """
         debug_frame = frame.copy()
         
@@ -129,13 +127,12 @@ class DynamicCourtMasker:
         # Convert to HSV space to handle shadows and lighting
         hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
-        # Create a blank mask, then draw the user's 4 points as a white polygon
+        # Create a blank mask, then draw the source 4 points as a white polygon
         roi_mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
         corners_int = np.int32(court_corners).reshape((-1, 1, 2))
         cv2.fillPoly(roi_mask, [corners_int], 255)
         
         # Calculate a 2D histogram using only Hue (color) and Saturation (intensity)
-        # We drop the Value channel so the tracker ignores shadows
         self.court_hist = cv2.calcHist(
             [hsv_frame], [0, 1], roi_mask, 
             [16, 16], [0, 180, 0, 256]
@@ -152,7 +149,6 @@ class DynamicCourtMasker:
         hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         
         # Backproject: OpenCV assigns a probability (0-255) to every pixel 
-        # based on how closely it matches the Frame 1 histogram
         back_proj = cv2.calcBackProject(
             [hsv_frame], [0, 1], self.court_hist, 
             [0, 180, 0, 256], 1
@@ -169,3 +165,6 @@ class DynamicCourtMasker:
         
         return mask
 
+    def recalibrate(self, frame, new_corners):
+        """Retrain the color profile using the newly discovered court area"""
+        self.initialize(frame, new_corners)

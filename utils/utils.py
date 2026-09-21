@@ -6,9 +6,11 @@ import numpy as np
 from pathlib import Path
 from enum import IntFlag, auto
 from datetime import datetime
+from typing import NamedTuple, Iterable
 
 from dataclasses import dataclass, asdict
 from typing import Optional, Any
+from data_manager.dataclass import *
 
 @dataclass
 class PipelineConfig:
@@ -45,8 +47,11 @@ class PipelineConfig:
     # Optical Flow settings
     recalibration_rate: int = 30 # Number of frames to run optical flow before recalibration
 
-    # default fallback
+    # default FPS fallback
     default_fps: int = 30
+
+    # Delay buffer size
+    buffer_size: int = 10
 
 # Binary Flags
 class MediaFilter(IntFlag):
@@ -303,3 +308,14 @@ def print_config(config: PipelineConfig):
         print(f"{display_key:<20}: {display_val}")
     
     print("="*30 + "\n")
+
+def print_vector(vec: Vector2D | None, precision: int = 2) -> str:
+    """Formats a single Vector2D with controlled float precision."""
+    if vec is None:
+        return "Vector2D(None)"
+    return f"Vector2D(x={vec.x:.{precision}f}, y={vec.y:.{precision}f})"
+
+def print_vectors(vectors: Iterable[Vector2D], precision: int = 2) -> None:
+    """Helper to cleanly print a batch or list of Vector2Ds (e.g., keypoints)."""
+    formatted_items = [f"({v.x:.{precision}f}, {v.y:.{precision}f})" for v in vectors]
+    print(f"Vectors [{len(formatted_items)}]: " + ", ".join(formatted_items))

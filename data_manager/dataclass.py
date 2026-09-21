@@ -6,8 +6,8 @@ import numpy as np
 class PlayerDetection:
     track_id: int
     bbox: BBox
-    src_px: Vector2D
-    map_px: Vector2D
+    src_coords: Vector2D
+    map_coords: Vector2D
     confidence: float = 0.0
 
 @dataclass
@@ -18,8 +18,10 @@ class FrameMetrics:
 
 @dataclass
 class FrameResult:
-    # players: List[Dict[str, Any]]
+    # frame_idx: int
     players: list[PlayerDetection] = field(default_factory=list)
+    court_corners: np.ndarray | None = None
+    dst_points: np.ndarray | None = None
     homography_matrix: np.ndarray | None = None 
     # metrics: FrameMetrics = field(default_factory=FrameMetrics)
     floor_mask: np.ndarray | None = None

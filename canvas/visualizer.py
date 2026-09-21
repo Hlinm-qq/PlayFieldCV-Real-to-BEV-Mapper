@@ -14,12 +14,12 @@ class Visualizer:
         self.math_wid = court_width
 
         # Screen dimensions flip based on orientation
-        if self.orientation == "horizontal":
-            self.screen_w = court_length + (padding * 2)
-            self.screen_h = court_width + (padding * 2)
-        else:
+        if self.orientation == "vertical":
             self.screen_w = court_width + (padding * 2)
             self.screen_h = court_length + (padding * 2)
+        else:
+            self.screen_w = court_length + (padding * 2)
+            self.screen_h = court_width + (padding * 2)
 
     def draw_empty_court(self):
         """Draws a fresh 2D volleyball court canvas."""
@@ -36,24 +36,25 @@ class Visualizer:
 
         # Draw Outer Boundary
         cv2.rectangle(canvas, (p, p), (w, h), line_color, 4)
-
-        if self.orientation == "horizontal":
-            # Net is a vertical line in the middle
-            net_x = p + (self.math_len // 2)
-            cv2.line(canvas, (net_x, p), (net_x, h), line_color, 4)
-            # Attack lines (3 meters = 1/6 of length)
-            attack_offset = self.math_len // 6
-            cv2.line(canvas, (net_x - attack_offset, p), (net_x - attack_offset, h), line_color, 2)
-            cv2.line(canvas, (net_x + attack_offset, p), (net_x + attack_offset, h), line_color, 2)
-            
-        else: # "vertical"
+   
+        if self.orientation == "vertical": # "vertical"
             # Net is a horizontal line in the middle
             net_y = p + (self.math_len // 2)
-            cv2.line(canvas, (p, net_y), (w, net_y), line_color, 4)
+            cv2.line(canvas, (p, net_y), (w, net_y), line_color, 6)
             # Attack lines
             attack_offset = self.math_len // 6
             cv2.line(canvas, (p, net_y - attack_offset), (w, net_y - attack_offset), line_color, 2)
             cv2.line(canvas, (p, net_y + attack_offset), (w, net_y + attack_offset), line_color, 2)
+        else: # horizontal
+            # Net is a vertical line in the middle
+            net_x = p + (self.math_len // 2)
+            print("net_x")
+            print(net_x)
+            cv2.line(canvas, (net_x, p), (net_x, h), line_color, 6)
+            # Attack lines (3 meters = 1/6 of length)
+            attack_offset = self.math_len // 6
+            cv2.line(canvas, (net_x - attack_offset, p), (net_x - attack_offset, h), line_color, 2)
+            cv2.line(canvas, (net_x + attack_offset, p), (net_x + attack_offset, h), line_color, 2)
 
         return canvas
 
@@ -64,9 +65,10 @@ class Visualizer:
         """
         # Convert Math Space to Pixel Space (Handling the orientation flip)
         if self.orientation == "vertical":
-            draw_x = self.padding + (self.math_wid - math_y)
-            draw_y = self.padding + math_x
-        else:
+            draw_x = self.padding + math_y
+            draw_y = self.padding + (self.math_len - math_x)
+            
+        else: # Rotate 90 degrees clockwise
             draw_x = self.padding + math_x
             draw_y = self.padding + math_y
 
@@ -78,8 +80,13 @@ class Visualizer:
         if 0 <= draw_x <= self.screen_w and 0 <= draw_y <= self.screen_h:
             # Draw the player
             cv2.circle(canvas, (draw_x, draw_y), 8, (0, 255, 0), -1)
-            cv2.putText(canvas, str(player_id), (draw_x - 10, draw_y - 15), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            text = str(player_id)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            text_size = cv2.getTextSize(text, font, 0.6, 2)[0]
+            cv2.putText(canvas, text, 
+                        (draw_x - (text_size[0] // 2), draw_y - 15), 
+                        font, 0.6, (255, 255, 255), 2)
         else:
             pass 
             
@@ -87,7 +94,6 @@ class Visualizer:
     
     def get_content_size(self):
         return self.content_size
-
 
 class FieldProjector:
     def __init__(self, src_points, canvas_width, canvas_height, dst_points=None, padding=0, is_dynamic=False):

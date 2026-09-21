@@ -107,7 +107,7 @@ class EngineManager:
         else:
             outputs = self.model.track(frame, persist=True, conf=0.1, classes=self.class_id_filter)
 
-        results = self.get_output(outputs, BoxFormat.XYXY)
+        results = self.get_output(outputs, BoxFormat.XYXY | BoxFormat.CONFIDENCE | BoxFormat.ID)
         # detections = dict_to_list(results)
 
         # detected_players = []

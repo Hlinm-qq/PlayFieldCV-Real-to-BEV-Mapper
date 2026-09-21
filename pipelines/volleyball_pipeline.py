@@ -25,7 +25,12 @@ class VolleyballPipeline:
         detected_players = []
 
         # Update Court Matrix
-        current_H, debug_mask = self.court.update(frame, frame_idx)
+        current_H, debug_mask, detected_corners, dst_pts = self.court.update(frame, frame_idx)
+
+        # print("dst_pts")
+        # print(dst_pts)
+        # print("detected_corners")
+        # print(detected_corners)
 
         if (self.run_detect):
             # Run Object Detection
@@ -37,6 +42,9 @@ class VolleyballPipeline:
                 x1, y1, x2, y2 = det["xyxy"]
                 new_bbox = BBox(x1, y1, x2, y2)
 
+                confidence = det["confidence"]
+                tracked_id = det["id"]
+
                 # Calculate foot coordinate (bottom center of bounding box)
                 src_coords = new_bbox.bottom_center
 
@@ -45,17 +53,19 @@ class VolleyballPipeline:
                 map_coords = Vector2D(map_x, map_y)
 
                 found_player = PlayerDetection(
-                    track_id=-1, 
+                    track_id=tracked_id, 
                     bbox=new_bbox, 
-                    src_px=src_coords, 
-                    map_px=map_coords, 
-                    confidence=0.0
+                    src_coords=src_coords, 
+                    map_coords=map_coords, 
+                    confidence=confidence
                 )
                 detected_players.append(found_player)
 
         # Package outputs
         return FrameResult(
             players=detected_players,
+            court_corners=detected_corners,
+            dst_points=dst_pts,
             homography_matrix=current_H,
             floor_mask=debug_mask
         )
