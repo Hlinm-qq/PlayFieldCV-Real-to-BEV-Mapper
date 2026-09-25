@@ -264,9 +264,9 @@ def stitch_two_frames(img1, img2, bg_color=(40, 40, 40)):
 
     # Debug
     images_to_concat = [img1, img2]
-    print("Start Image stiching...")
-    for i, img in enumerate(images_to_concat):
-        print(f"Image {i} -> Shape: {img.shape}, Type: {img.dtype}")
+    # print("Start Image stiching...")
+    # for i, img in enumerate(images_to_concat):
+    #     print(f"Image {i} -> Shape: {img.shape}, Type: {img.dtype}")
 
     h1, w1 = img1.shape[:2]
     h2, w2 = img2.shape[:2]

@@ -35,12 +35,16 @@ class LKTracker:
             self.old_gray, mask=safe_floor_mask, **self.feature_params
         )
 
-        term_crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-        self.tracked_features = cv2.cornerSubPix(self.old_gray, self.tracked_features, (5, 5), (-1, -1), term_crit)
+        if self.tracked_features is not None and len(self.tracked_features) > 0:
+            term_crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+            self.tracked_features = cv2.cornerSubPix(self.old_gray, self.tracked_features, (5, 5), (-1, -1), term_crit)
+        else:
+            print("tracked_features invalid, Failed to reset LK")
+            self.tracked_features = None
 
     def update_matrix(self, current_frame, safe_floor_mask):
         """Called every frame"""
-        if self.old_gray is None or self.tracked_features is None:
+        if self.old_gray is None or self.tracked_features is None or len(self.tracked_features) == 0:
             return None, False
         
         current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
@@ -89,8 +93,11 @@ class LKTracker:
             self.old_gray, mask=safe_floor_mask, **self.feature_params
         )
 
-        term_crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-        self.tracked_features = cv2.cornerSubPix(self.old_gray, self.tracked_features, (5, 5), (-1, -1), term_crit)
+        if self.tracked_features is not None and len(self.tracked_features) > 0:
+            term_crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+            self.tracked_features = cv2.cornerSubPix(self.old_gray, self.tracked_features, (5, 5), (-1, -1), term_crit)
+        else:
+            self.tracked_features = None
 
         return current_H, lk_health
 
@@ -141,28 +148,43 @@ class DynamicCourtMasker:
         # Normalize to 0-255 for backprojection math
         cv2.normalize(self.court_hist, self.court_hist, 0, 255, cv2.NORM_MINMAX)
 
-    def get_mask(self, frame):
-        """Generates a binary mask where the court is white, and players are black."""
+    def get_mask(self, frame, player_detection=None):
+        """Generates a binary mask where valid area is white, and the rest are black."""
+        # Base Mask Generation (Color Histogram)
         if self.court_hist is None:
-            return np.ones(frame.shape[:2], dtype=np.uint8) * 255
-
-        hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            mask = np.ones(frame.shape[:2], dtype=np.uint8) * 255
+        else:
+            hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            # Backproject: OpenCV assigns a probability (0-255) to every pixel 
+            back_proj = cv2.calcBackProject(
+                [hsv_frame], [0, 1], self.court_hist, 
+                [0, 180, 0, 256], 1
+            )
+            # Threshold: Only keep pixels that are highly likely to be the floor
+            _, mask = cv2.threshold(back_proj, 50, 255, cv2.THRESH_BINARY)
+            # Morphological Opening: Erase isolated noisy pixels (like a shoe that matched the floor color)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
+            # Morphological Closing: Fill small holes in the floor
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
         
-        # Backproject: OpenCV assigns a probability (0-255) to every pixel 
-        back_proj = cv2.calcBackProject(
-            [hsv_frame], [0, 1], self.court_hist, 
-            [0, 180, 0, 256], 1
-        )
-        
-        # Threshold: Only keep pixels that are highly likely to be the floor
-        _, mask = cv2.threshold(back_proj, 50, 255, cv2.THRESH_BINARY)
-        
-        # Morphological Opening: Erase isolated noisy pixels (like a shoe that matched the floor color)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.kernel)
-        
-        # Morphological Closing: Fill small holes in the floor
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self.kernel)
-        
+        # Negative Masking (Erase Players)
+        if player_detection:
+            for det in player_detection:
+                x1, y1, x2, y2 = det["xyxy"]
+                
+                # Padding: Expand box by 10% to catch bleeding edges
+                pad_x = int((x2 - x1) * 0.1) 
+                pad_y = int((y2 - y1) * 0.1) 
+                
+                # Image Boundaries
+                px1 = max(0, int(x1 - pad_x))
+                py1 = max(0, int(y1 - pad_y))
+                px2 = min(frame.shape[1], int(x2 + pad_x))
+                py2 = min(frame.shape[0], int(y2 + pad_y))
+                
+                # Draw black rectangle over bounding box
+                cv2.rectangle(mask, (px1, py1), (px2, py2), 0, -1)
+                
         return mask
 
     def recalibrate(self, frame, new_corners):

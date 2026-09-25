@@ -26,7 +26,7 @@ class CourtTracker:
         
         self.current_matrix, _ = cv2.findHomography(src_corners, base_dst_points)
 
-    def update(self, frame, frame_idx):
+    def update(self, frame, frame_idx, player_detection = None):
         if self.current_matrix is None: 
             return None, None, None, None
 
@@ -34,7 +34,7 @@ class CourtTracker:
         lk_health = 1.0
 
         # Generate the pristine floor mask using histogram backprojection
-        safe_floor_mask = self.masker.get_mask(frame)
+        safe_floor_mask = self.masker.get_mask(frame, player_detection)
 
         # Pass the frame AND the mask to the optical flow engine
         new_matrix, lk_health = self.lk.update_matrix(frame, safe_floor_mask)

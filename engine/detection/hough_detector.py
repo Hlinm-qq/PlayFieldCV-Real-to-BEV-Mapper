@@ -448,62 +448,7 @@ class HoughDetector:
                 
         return clean_lines
 
-    def filter_by_ghost_court(self, raw_hough_lines, current_H_matrix, distance_tolerance=40):
-        """
-        Filters raw camera lines by comparing them to the projected 'Ghost Court'.
-        """
-        # Calculate the Inverse Homography Matrix
-        _, H_inv = cv2.invert(current_H_matrix)
-        
-        # Define the exact endpoints of your canvas lines (e.g., The Center Line)
-        # The center line runs from (900, 0) to (900, 900) on our canvas
-        canvas_lines = [
-            [[0, 0], [0, 900]],       # Left Baseline
-            [[900, 0], [900, 900]],   # Center Line
-            [[1800, 0], [1800, 900]], # Right Baseline
-            [[0, 0], [1800, 0]],      # Top Sideline
-            [[0, 900], [1800, 900]]   # Bottom Sideline
-        ]
-        
-        expected_camera_lines = []
-        
-        # Project the canvas lines backward onto the camera lens!
-        for line in canvas_lines:
-            # Format for perspectiveTransform: shape (N, 1, 2)
-            pts = np.array(line, dtype=np.float32).reshape(-1, 1, 2)
-            
-            # Project using the INVERSE matrix
-            projected_pts = cv2.perspectiveTransform(pts, H_inv)
-            
-            # Extract the projected (x, y) endpoints in the camera view
-            px1, py1 = projected_pts[0][0]
-            px2, py2 = projected_pts[1][0]
-            
-            # Calculate the expected Slope and Intercept in the camera view
-            if px2 - px1 != 0:
-                expected_slope = (py2 - py1) / (px2 - px1)
-                expected_intercept = py1 - (expected_slope * px1)
-                expected_camera_lines.append({'slope': expected_slope, 'intercept': expected_intercept})
-                
-        # Filter the incoming raw Hough lines against the Ghost Lines
-        true_lines = []
-        
-        for raw_line in raw_hough_lines:
-            raw_slope, raw_intercept = raw_line # Assuming you've converted raw lines to equations
-            
-            # Check if this raw line matches ANY of our expected Ghost Lines
-            for ghost_line in expected_camera_lines:
-                # If the slope is similar AND it sits in the exact right spot (intercept)
-                slope_diff = abs(ghost_line['slope'] - raw_slope)
-                intercept_diff = abs(ghost_line['intercept'] - raw_intercept)
-                
-                if slope_diff < 0.2 and intercept_diff < distance_tolerance:
-                    true_lines.append(raw_line)
-                    break # We found a match, keep this line and stop checking
-                    
-        return true_lines
-
-    def match_lines_to_ghost_court(self, raw_lines, current_H, distance_thresh=30, angle_thresh=10):
+    def match_lines_to_ghost_court(self, raw_lines, current_H, distance_thresh=10, angle_thresh=10):
         """Project Ghost Lines and calculate their dynamic angles"""
         if raw_lines is None: return None
 
@@ -546,7 +491,7 @@ class HoughDetector:
                         
         return matched_results
 
-    def fit_perfect_lines(self, categorized_lines):
+    def fit_lines(self, categorized_lines):
         """
         Takes the sorted buckets of raw segments and fits them into one line using cv2.fitLine.
         """
@@ -582,46 +527,7 @@ class HoughDetector:
                 
         return final_court_lines
 
-    def extract_zone_corners(self, final_court_lines, zone_type="left_half"):
-        """
-        Finds the 4 corners of a specific zone using the named lines.
-        Returns them in a standard order: Top-Left, Top-Right, Bottom-Left, Bottom-Right.
-        """
-        # Define which lines make up our target tracking zone
-        if zone_type == "left_half":
-            required_lines = ["left_baseline", "left_attackline", "top_sideline", "bottom_sideline"]
-        elif zone_type == "right_half":
-            required_lines = ["right_attackline", "right_baseline", "top_sideline", "bottom_sideline"]
-        else:
-            return None 
-
-        # Ensure all 4 required lines were actually found this frame
-        for req in required_lines:
-            if req not in final_court_lines:
-                return None
-                
-        # Calculate the 4 specific corners
-        if zone_type == "left_half":
-            tl = self._calculate_intersection(final_court_lines["top_sideline"], final_court_lines["left_baseline"])
-            tr = self._calculate_intersection(final_court_lines["top_sideline"], final_court_lines["left_attackline"])
-            bl = self._calculate_intersection(final_court_lines["bottom_sideline"], final_court_lines["left_baseline"])
-            br = self._calculate_intersection(final_court_lines["bottom_sideline"], final_court_lines["left_attackline"])
-        else:
-            tl = self._calculate_intersection(final_court_lines["top_sideline"], final_court_lines["right_attackline"])
-            tr = self._calculate_intersection(final_court_lines["top_sideline"], final_court_lines["right_baseline"])
-            bl = self._calculate_intersection(final_court_lines["bottom_sideline"], final_court_lines["right_attackline"])
-            br = self._calculate_intersection(final_court_lines["bottom_sideline"], final_court_lines["right_baseline"])
-        
-        if None in [tl, tr, bl, br]:
-            return None
-
-        # Format for tracking and Homography
-        # Shape must be (4, 1, 2) and float32
-        corners = np.array([tl, tr, bl, br], dtype=np.float32).reshape(-1, 1, 2)
-        
-        return corners
-
-    def extract_dynamic_corners(self, final_court_lines):
+    def extract_corners(self, final_court_lines):
         """
         Looks at the available lines, determines the visible zone, 
         and returns both the camera points and the 2D canvas points
@@ -639,26 +545,57 @@ class HoughDetector:
         verticals_found = []
         dst_pts_list = []
 
-        # Check for Left Half
-        if "left_baseline" in keys and "left_attackline" in keys:
+        # Order: Top-Left, Top-Right, Bottom-Left, Bottom-Right
+        # Check for Full Court
+        if "left_baseline" in keys and "right_baseline" in keys:
+            verticals_found = [final_court_lines["left_baseline"], final_court_lines["right_baseline"]]
+            # 2D Blueprint Coordinates (Scale: 100px = 1m)
+            dst_pts_list = [[0, 0], [1800, 0], [0, 900], [1800, 900]]
+
+        # Left back + left attack + right attack areas
+        elif "left_baseline" in keys and "right_attackline" in keys:
+            verticals_found = [final_court_lines["left_baseline"], final_court_lines["right_attackline"]]
+            dst_pts_list = [[0, 0], [1200, 0], [0, 900], [1200, 900]]
+
+        # Left attack + right attack + right back areas
+        elif "left_attackline" in keys and "right_baseline" in keys:
+            verticals_found = [final_court_lines["left_attackline"], final_court_lines["right_baseline"]]
+            dst_pts_list = [[600, 0], [1800, 0], [600, 900], [1800, 900]]
+
+        # Left back + left attack areas
+        elif "left_baseline" in keys and "center_line" in keys:
+            verticals_found = [final_court_lines["left_baseline"], final_court_lines["center_line"]]
+            dst_pts_list = [[0, 0], [900, 0], [0, 900], [900, 900]]
+
+        # Right attack + right back areas
+        elif "center_line" in keys and "right_baseline" in keys:
+            verticals_found = [final_court_lines["center_line"], final_court_lines["right_baseline"]]
+            dst_pts_list = [[900, 0], [1800, 0], [900, 900], [1800, 900]]
+
+        # left attack + right attack areas
+        elif "left_attackline" in keys and "right_attackline" in keys:
+            verticals_found = [final_court_lines["left_attackline"], final_court_lines["right_attackline"]]
+            dst_pts_list = [[600, 0], [1200, 0], [600, 900], [1200, 900]]
+
+        # Left back area
+        elif "left_baseline" in keys and "left_attackline" in keys:
             verticals_found = [final_court_lines["left_baseline"], final_court_lines["left_attackline"]]
-            
-            # 2D Blueprint Coordinates for Left Half (Scale: 100px = 1m)
-            # Order: Top-Left, Top-Right, Bottom-Left, Bottom-Right
             dst_pts_list = [[0, 0], [600, 0], [0, 900], [600, 900]]
 
-        # Check for Right Half
+        # Right back area
         elif "right_attackline" in keys and "right_baseline" in keys:
             verticals_found = [final_court_lines["right_attackline"], final_court_lines["right_baseline"]]
-            
-            # 2D Blueprint Coordinates for Right Half
             dst_pts_list = [[1200, 0], [1800, 0], [1200, 900], [1800, 900]]
 
-        # Check for Full Court (If zoomed out)
-        elif "left_baseline" in keys and "right_baseline" in keys:
-            verticals_found = [final_court_lines["left_baseline"], final_court_lines["right_baseline"]]
-            dst_pts_list = [[0, 0], [1800, 0], [0, 900], [1800, 900]]
-            
+        # Left attack area
+        elif "left_attackline" in keys and "center_line" in keys:
+            verticals_found = [final_court_lines["left_attackline"], final_court_lines["center_line"]]
+            dst_pts_list = [[600, 0], [900, 0], [600, 900], [900, 900]]
+
+        # Right attack area
+        elif "center_line" in keys and "right_attackline" in keys:
+            verticals_found = [final_court_lines["center_line"], final_court_lines["right_attackline"]]
+            dst_pts_list = [[900, 0], [1200, 0], [900, 900], [1200, 900]]
         else:
             return None, None
 
@@ -689,11 +626,11 @@ class HoughDetector:
             categorized_buckets = self.match_lines_to_ghost_court(raw_lines, current_H)
             
             # Fit the grouped detected lines 
-            final_lines = self.fit_perfect_lines(categorized_buckets)
+            final_lines = self.fit_lines(categorized_buckets)
             self.debug_draw_fit_lines(frame, final_lines)
             
             # Extract new detected corners
-            detected_corner, dst_pts = self.extract_dynamic_corners(final_lines)
+            detected_corner, dst_pts = self.extract_corners(final_lines)
             self.debug_draw_corners(frame, detected_corner)
             
             # Feeding to the next cycle

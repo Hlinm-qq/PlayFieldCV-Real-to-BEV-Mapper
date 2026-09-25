@@ -479,7 +479,7 @@ def tracker_pipeline_v2(config: PipelineConfig, device):
             if config.is_combine_result:
                 # Glue the two images together horizontally
                 combined_view = stitch_two_frames(frame, map_canvas)
-                print(get_frame_stats(combined_view))
+                # print(get_frame_stats(combined_view))
                 # combined_view = cv2.resize(combined_view, (1500, 700)) 
 
             if frame_counter < 11:
@@ -664,7 +664,7 @@ def tracker_pipeline_v2_nonpose(config: PipelineConfig, device):
             if config.is_combine_result:
                 # Glue the two images together horizontally
                 combined_view = stitch_two_frames(frame, map_canvas)
-                print(get_frame_stats(combined_view))
+                # print(get_frame_stats(combined_view))
                 # combined_view = cv2.resize(combined_view, (1500, 700)) 
 
             if frame_counter < 11:
@@ -922,7 +922,7 @@ def tracker_pipeline_v3(config: PipelineConfig, device):
             if config.is_combine_result:
                 # Glue the two images together horizontally
                 combined_view = stitch_two_frames(frame, map_canvas)
-                print(get_frame_stats(combined_view))
+                # print(get_frame_stats(combined_view))
                 # combined_view = cv2.resize(combined_view, (1500, 700)) 
             
             # Display result
@@ -960,7 +960,8 @@ def flow4(config: PipelineConfig, device):
     is_images = stream.get_type() != "video"
 
     canvas_w, canvas_h = COURT_LENGTH, COURT_WIDTH
-    dst_points = COURT_ZONES["5"].get("dst_pts")
+    court_zone = COURT_ZONES["2"]
+    dst_points = court_zone.get("dst_pts")
 
     # Get first frame for calibration
     first_frame = stream.get_first_frame()
@@ -968,10 +969,13 @@ def flow4(config: PipelineConfig, device):
         raise ValueError("Failed to read the first frame from the source.")
 
     # Get source corners
+    print(f"Using {court_zone.get("name")} as initial corners")
     if config.is_manual_picker:
         point_picker = PointPicker()
         src_points = point_picker.get_points(first_frame)
     else:
+        # Left back area
+        # DEFAULT_SRC_POINTS = np.float32([[147, 329], [291, 333], [269, 483], [81, 474]])
         src_points = DEFAULT_SRC_POINTS
 
     output_manager = OutputManager()
@@ -1047,7 +1051,7 @@ def flow4(config: PipelineConfig, device):
 
                     visualizer.draw_player_on_map(canvas, p.map_coords.x, p.map_coords.y, p.track_id)
 
-                    print(f"player: {p.track_id} | {p.confidence} | {print_vector(p.src_coords)} | {print_vector(p.map_coords)}")
+                    # print(f"player: {p.track_id} | {p.confidence} | {print_vector(p.src_coords)} | {print_vector(p.map_coords)}")
 
                 # Display telemetry
                 print(f"Raw Frame {frame_idx} | "
@@ -1074,7 +1078,7 @@ def flow4(config: PipelineConfig, device):
                 if config.is_combine_result:
                     # Glue the two images together horizontally
                     combined_view = stitch_two_frames(frame, canvas)
-                    print(get_frame_stats(combined_view))
+                    # print(get_frame_stats(combined_view))
                     # combined_view = cv2.resize(combined_view, (1500, 700)) 
                 
                 # Display result
@@ -1168,7 +1172,7 @@ def main():
                             save_video=False,
                             map_padding=200, 
                             class_id_filter=target_classes,
-                            is_manual_picker=False,
+                            is_manual_picker=True,
                             frame_count=40, 
                             model_path="yolov8s.pt",
                             sleep_second=2,
