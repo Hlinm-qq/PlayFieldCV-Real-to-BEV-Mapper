@@ -1,13 +1,12 @@
 *.pt
-*.md
 *.pyc
 *.ipynb*
-dump*
 *.docx*
-*tool*.py
 
 .venv/
 /dataset/
 /output/
 /resources/
+/docs/
+/tool/
 __pycache__/

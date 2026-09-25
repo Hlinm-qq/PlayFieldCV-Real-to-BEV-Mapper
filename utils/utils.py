@@ -4,7 +4,6 @@ import math
 import torch
 import numpy as np
 from pathlib import Path
-from enum import IntFlag, auto
 from datetime import datetime
 from typing import NamedTuple, Iterable
 
@@ -52,87 +51,6 @@ class PipelineConfig:
 
     # Delay buffer size
     buffer_size: int = 10
-
-# Binary Flags
-class MediaFilter(IntFlag):
-    NONE = 0
-    IMAGES = auto()  # 1 (0b001)
-    VIDEOS = auto()  # 2 (0b010)
-    TEXTS = auto()   # 4 (0b100)
-    ALL = IMAGES | VIDEOS | TEXTS 
-
-def rename_media(directory_path, prefix="", mode=MediaFilter.ALL, start_num=1, overwrite=True, pattern=None):
-    """
-    Renames files with auto-calculated numerical padding. \n
-    usage: rename_media("my_folder", prefix="media", mode=(MediaFilter.IMAGES | MediaFilter.VIDEOS))
-    """
-    print(f"--- Running rename_media ---")
-    print(f"Looking at: {directory_path}")
-
-    image_exts = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
-    video_exts = {'.mp4', '.mkv', '.mov', '.avi', '.wmv'}
-    text_exts = {'.txt'}
-    
-    target_extensions = set()
-    if mode & MediaFilter.IMAGES:
-        target_extensions.update(image_exts)
-        print("Targeting images")
-    if mode & MediaFilter.VIDEOS:
-        target_extensions.update(video_exts)
-        print("Targeting videos")
-    if mode & MediaFilter.TEXTS:
-        target_extensions.update(text_exts)
-        print("Targeting texts")
-
-    path = Path(directory_path)
-    if not path.is_dir():
-        print(f"Error: {directory_path} is not a valid directory.")
-        return
-
-    # Gather and sort files
-    search_pattern = pattern if pattern else "*"
-    files = [f for f in path.glob(search_pattern) if f.is_file() and f.suffix.lower() in target_extensions]
-    files.sort()
-    
-    total_files = len(files)
-    if total_files == 0:
-        print("No matching files found.")
-        return
-
-    # --- Auto-calculate padding ---
-    # Calculate based on the highest number that will be reached
-    max_number = start_num + total_files - 1
-    padding = len(str(max_number)) 
-    # Ensure at least 2 digits
-    padding = max(padding, 2) 
-
-    if prefix != "":
-        prefix += "_"
-    prefix_str = f"{prefix}_" if prefix else ""
-
-    print(f"Mode: {bin(mode)} | Pattern: {search_pattern} | Found {total_files} files.")
-    print("--- PREVIEW ---")
-    print(f"Directory: {path.absolute()}")
-    print(f"Files found: {total_files}")
-    print(f"Example rename: {files[0].name} -> {prefix_str}{start_num:0{padding}d}{files[0].suffix}")
-    print("---------------")
-
-    confirm = input(f"Proceed renaming {total_files} files? (y/n): ").lower()
-    if confirm != 'y':
-        print("Operation cancelled by user.")
-        return
-
-    for i, file_path in enumerate(files, start=start_num):
-        # Create dynamic format string, e.g., "prefix_0001.jpg"
-        new_name = f"{prefix_str}{i:0{padding}d}{file_path.suffix}"
-        new_path = path / new_name
-        
-        if new_path.exists() and new_path != file_path and not overwrite:
-            print(f"Warning: {new_name} already exists. Skipping.")
-            continue
-            
-        file_path.rename(new_path)
-        # print(f"Renamed: {file_path.name} -> {new_name}")
 
 def calculate_iou(boxA, boxB):
     """
