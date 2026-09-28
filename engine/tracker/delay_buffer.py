@@ -42,6 +42,7 @@ class DelayBuffer:
         for player in newest_result.players:
             track_id = player.track_id
             if track_id == -1: continue # Ignore untracked detections
+            team_id = player.team_id
 
             # Find the last time this ID exists in the older frames
             last_seen_idx = -1
@@ -54,9 +55,9 @@ class DelayBuffer:
             # If they were missing for 1 to (buffer_size - 1) frames, fix it
             frames_missing = (len(self.queue) - 1) - last_seen_idx - 1
             if last_seen_idx != -1 and 0 < frames_missing < self.buffer_size:
-                self._backfill(track_id, last_seen_idx, len(self.queue) - 1)
+                self._backfill(track_id, team_id, last_seen_idx, len(self.queue) - 1)
 
-    def _backfill(self, track_id, start_idx, end_idx):
+    def _backfill(self, track_id, team_id, start_idx, end_idx):
         """Calculates the linear step and inserts synthesized players into missing frames."""
         start_player = next(p for p in self.queue[start_idx][1].players if p.track_id == track_id)
         end_player = next(p for p in self.queue[end_idx][1].players if p.track_id == track_id)
@@ -102,6 +103,7 @@ class DelayBuffer:
                 track_id=track_id,
                 bbox=ghost_bbox,
                 src_coords=src_coords,
+                team_id=team_id,
                 map_coords=Vector2D(map_x, map_y),
                 confidence=0.0 # 0.0 marks it as a synthesized frame
             )

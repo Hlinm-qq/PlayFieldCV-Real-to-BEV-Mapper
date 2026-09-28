@@ -8,6 +8,7 @@ class PlayerDetection:
     bbox: BBox
     src_coords: Vector2D
     map_coords: Vector2D
+    team_id: str
     confidence: float = 0.0
 
 @dataclass

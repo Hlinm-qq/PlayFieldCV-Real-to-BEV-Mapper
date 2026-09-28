@@ -48,8 +48,8 @@ class Visualizer:
         else: # horizontal
             # Net is a vertical line in the middle
             net_x = p + (self.math_len // 2)
-            print("net_x")
-            print(net_x)
+            # print("net_x")
+            # print(net_x)
             cv2.line(canvas, (net_x, p), (net_x, h), line_color, 6)
             # Attack lines (3 meters = 1/6 of length)
             attack_offset = self.math_len // 6
@@ -58,7 +58,7 @@ class Visualizer:
 
         return canvas
 
-    def draw_player_on_map(self, canvas, math_x, math_y, player_id):
+    def draw_player_on_map(self, canvas, math_x, math_y, player_id, color: tuple = (0, 255, 0)):
         """
         Draws a dot and ID on the 2D map, math_x and math_y is horizontal based.
         shifts them into the pixel window, and draws them if they fit on screen.
@@ -78,8 +78,8 @@ class Visualizer:
 
         # Limit Check
         if 0 <= draw_x <= self.screen_w and 0 <= draw_y <= self.screen_h:
-            # Draw the player
-            cv2.circle(canvas, (draw_x, draw_y), 8, (0, 255, 0), -1)
+            # Draw the player (as dot)
+            cv2.circle(canvas, (draw_x, draw_y), 8, color, -1)
 
             text = str(player_id)
             font = cv2.FONT_HERSHEY_SIMPLEX

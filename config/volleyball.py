@@ -51,3 +51,12 @@ COURT_ZONES = {
 
 # Fallback points for testing without the PointPicker (Left back Area)
 DEFAULT_SRC_POINTS = np.float32([[147, 329], [291, 333], [269, 483], [81, 474]])
+
+COLOR_CONFIG = {
+    "team_a": (255, 0, 0),
+    "team_a_libero": (255, 0, 0),
+    "team_b": (0, 0, 255),
+    "team_b_libero": (0, 0, 255),
+    "referee": (0, 255, 0),
+    "unknown": (0, 0, 0)
+}

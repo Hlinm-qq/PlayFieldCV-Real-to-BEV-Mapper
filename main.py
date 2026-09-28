@@ -16,7 +16,7 @@ from data_manager.dataclass import *
 from canvas.visualizer import *
 from canvas.canvas_utils import *
 
-from pipelines.volleyball_pipeline import VolleyballPipeline
+from pipelines.volleyball_pipeline import VolleyballPipeline, TeamClassifier
 
 from utils.utils import *
 from config.volleyball import *
@@ -960,8 +960,7 @@ def flow4(config: PipelineConfig, device):
     is_images = stream.get_type() != "video"
 
     canvas_w, canvas_h = COURT_LENGTH, COURT_WIDTH
-    court_zone = COURT_ZONES["2"]
-    dst_points = court_zone.get("dst_pts")
+    court_zone = COURT_ZONES["7"]
 
     # Get first frame for calibration
     first_frame = stream.get_first_frame()
@@ -977,13 +976,15 @@ def flow4(config: PipelineConfig, device):
         # Left back area
         # DEFAULT_SRC_POINTS = np.float32([[147, 329], [291, 333], [269, 483], [81, 474]])
         src_points = DEFAULT_SRC_POINTS
+    dst_points = court_zone.get("dst_pts")
 
     output_manager = OutputManager()
     court_detector = CourtTracker(0.15, config.recalibration_rate)
     yolo_engine = EngineManager(EngineType.ULTRALYTICSYOLO, config.model_path, config.use_wrapper, device, config.enable_tracking, not is_images, config.class_id_filter)
     projector = FieldProjector(src_points, canvas_w, canvas_h, dst_points, config.map_padding)
     visualizer = Visualizer(canvas_w, canvas_h, config.map_padding, config.map_orientation)
-    pipeline = VolleyballPipeline(court_detector, yolo_engine, projector, run_detect=config.is_run_detect)
+    team_classifer = TeamClassifier(Vector2D(COURT_LENGTH, COURT_WIDTH))
+    pipeline = VolleyballPipeline(court_detector, yolo_engine, projector, team_classifer, run_detect=config.is_run_detect)
     delay_buffer = DelayBuffer(buffer_size=config.buffer_size, mapper_handler=projector)
 
     pipeline.initialize(first_frame, src_points, dst_points)
@@ -1002,8 +1003,8 @@ def flow4(config: PipelineConfig, device):
     frame_stats = get_frame_stats(first_frame)
     if config.save_video and config.frame_count > 5:
         if config.is_combine_result:
-            video_width = frame_stats['Dimensions'][0] + canvas_w
-            video_height = max(frame_stats['Dimensions'][1], canvas_h)
+            video_width = frame_stats['Dimensions'][0] + canvas_w + config.map_padding*2
+            video_height = max(frame_stats['Dimensions'][1], canvas_h) + config.map_padding*2
         
             output_video_fps = target_fps
             if target_fps <= 0:
@@ -1049,7 +1050,10 @@ def flow4(config: PipelineConfig, device):
                         cv2.putText(frame, f"ID: {p.track_id}", (int(p.bbox.x1), int(p.bbox.y1) - 10), 
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-                    visualizer.draw_player_on_map(canvas, p.map_coords.x, p.map_coords.y, p.track_id)
+                    if p.team_id == "":
+                        p.team_id = team_classifer.get_locked_team(p.track_id)
+                    color = COLOR_CONFIG.get(p.team_id.lower(), (0,0,0))
+                    visualizer.draw_player_on_map(canvas, p.map_coords.x, p.map_coords.y, p.track_id, color)
 
                     # print(f"player: {p.track_id} | {p.confidence} | {print_vector(p.src_coords)} | {print_vector(p.map_coords)}")
 
@@ -1078,9 +1082,13 @@ def flow4(config: PipelineConfig, device):
                 if config.is_combine_result:
                     # Glue the two images together horizontally
                     combined_view = stitch_two_frames(frame, canvas)
-                    # print(get_frame_stats(combined_view))
+                    print(get_frame_stats(combined_view))
                     # combined_view = cv2.resize(combined_view, (1500, 700)) 
                 
+                if config.save_video:
+                    if config.is_combine_result:
+                        output_manager.video_out(combined_view)
+
                 # Display result
                 if not config.is_combine_result:
                     key_pressed = output_manager.display_frame(frame, "Original Detection")
@@ -1169,14 +1177,14 @@ def main():
                             use_wrapper=True,
                             enable_tracking=True,
                             is_combine_result=True, 
-                            save_video=False,
+                            save_video=True,
                             map_padding=200, 
                             class_id_filter=target_classes,
                             is_manual_picker=True,
                             frame_count=40, 
                             model_path="yolov8s.pt",
                             sleep_second=2,
-                            map_orientation="vertical",
+                            map_orientation="horizontal",
                             is_run_detect=True,
                             recalibration_rate=2,
                             buffer_size=5)
