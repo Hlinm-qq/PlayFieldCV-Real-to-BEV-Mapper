@@ -36,7 +36,17 @@ class Visualizer:
 
         # Draw Outer Boundary
         cv2.rectangle(canvas, (p, p), (w, h), line_color, 4)
-   
+
+        # Court side agenda
+        text1 = "LEFT"
+        text2 = "RIGHT"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        draw_x1 = p
+        draw_y1 = p + self.math_len + 30
+        draw_x2 = p
+        draw_y2 = p - 15
+        
         if self.orientation == "vertical": # "vertical"
             # Net is a horizontal line in the middle
             net_y = p + (self.math_len // 2)
@@ -55,6 +65,19 @@ class Visualizer:
             attack_offset = self.math_len // 6
             cv2.line(canvas, (net_x - attack_offset, p), (net_x - attack_offset, h), line_color, 2)
             cv2.line(canvas, (net_x + attack_offset, p), (net_x + attack_offset, h), line_color, 2)
+
+            draw_x1 = p
+            draw_y1 = p - 15
+            text_size2 = cv2.getTextSize(text2, font, 1, 2)[0]
+            draw_x2 = p + self.math_len - text_size2[0]
+            draw_y2 = draw_y1
+        
+        cv2.putText(canvas, text1, 
+                    (draw_x1, draw_y1), 
+                    font, 1, (255, 0, 0), 2)
+        cv2.putText(canvas, text2, 
+                    (draw_x2, draw_y2), 
+                    font, 1, (0, 0, 255), 2)
 
         return canvas
 

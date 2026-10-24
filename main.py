@@ -979,7 +979,8 @@ def flow4(config: PipelineConfig, device):
     dst_points = court_zone.get("dst_pts")
 
     output_manager = OutputManager()
-    court_detector = CourtTracker(0.15, config.recalibration_rate)
+    debug_manager = PipelineDebugger(enabled=config.debug_enable, resolution=config.debug_resolution, cols=config.debug_cols, rows=config.debug_rows)
+    court_detector = CourtTracker(0.15, config.recalibration_rate, debug_manager)
     yolo_engine = EngineManager(EngineType.ULTRALYTICSYOLO, config.model_path, config.use_wrapper, device, config.enable_tracking, not is_images, config.class_id_filter)
     projector = FieldProjector(src_points, canvas_w, canvas_h, dst_points, config.map_padding)
     visualizer = Visualizer(canvas_w, canvas_h, config.map_padding, config.map_orientation)
@@ -1035,7 +1036,8 @@ def flow4(config: PipelineConfig, device):
 
             if delayed_frame is not None:
                 # Debug
-                court_detector.debug_draw_lk_mask(frame, result.floor_mask)
+                debug_frame = court_detector.debug_draw_lk_mask(frame, result.floor_mask)
+                debug_manager.add("LK Mask", debug_frame)
 
                 # Measures total loop latency
                 total_loop_ms = (time.perf_counter() - loop_start) * 1000
@@ -1078,6 +1080,8 @@ def flow4(config: PipelineConfig, device):
                             (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 print(f"Target FPS: {target_fps if target_fps > 0 else 'MAX'}")
                 print(f"Actual FPS: {int(actual_fps)}")
+
+                debug_manager.show()
 
                 if config.is_combine_result:
                     # Glue the two images together horizontally
@@ -1177,7 +1181,7 @@ def main():
                             use_wrapper=True,
                             enable_tracking=True,
                             is_combine_result=True, 
-                            save_video=True,
+                            save_video=False,
                             map_padding=200, 
                             class_id_filter=target_classes,
                             is_manual_picker=True,
@@ -1187,7 +1191,8 @@ def main():
                             map_orientation="horizontal",
                             is_run_detect=True,
                             recalibration_rate=2,
-                            buffer_size=5)
+                            buffer_size=5,
+                            debug_resolution="svga")
     # is_finished = tracker_pipeline_v3(config, device)
     is_finished = flow4(config, device)
 

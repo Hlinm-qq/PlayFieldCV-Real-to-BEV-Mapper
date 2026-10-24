@@ -52,6 +52,12 @@ class PipelineConfig:
     # Delay buffer size
     buffer_size: int = 10
 
+    # Debug Config
+    debug_enable: bool = True
+    debug_resolution: str = "1080p"
+    debug_cols: int = 2
+    debug_rows: int = 2
+
 def calculate_iou(boxA, boxB):
     """
     Calculates the Intersection over Union (IoU) of two bounding boxes.
@@ -169,7 +175,7 @@ def get_frame_stats(img: np.ndarray):
 def stitch_two_frames(img1, img2, bg_color=(40, 40, 40)):
     """
     Horizontally stitches two images. If one is shorter, it pads the 
-    top and bottom with a background color to perfectly center it.
+    top and bottom with a background color to center it.
     bg_color defaults to a sleek dark gray (BGR format).
     """
     if len(img1.shape) == 2:
@@ -206,6 +212,58 @@ def stitch_two_frames(img1, img2, bg_color=(40, 40, 40)):
         img2 = cv2.copyMakeBorder(img2, pad_top, pad_bottom, 0, 0, cv2.BORDER_CONSTANT, value=bg_color)
 
     return cv2.hconcat([img1, img2])
+
+def create_grid_image(images, rows=None, cols=None, fill_color=(255, 255, 255)):
+    """
+    Create a grid image from a list of images.
+
+    Args:
+        images (list of np.ndarray): List of images to be arranged in a grid.
+        rows (int, optional): Number of rows in the grid. If not provided, it will be inferred.
+        cols (int, optional): Number of columns in the grid. If not provided, it will be inferred.
+        fill_color (tuple, optional): Color of the padding image (BGR format). Default is white (255, 255, 255).
+
+    Returns:
+        np.ndarray: Grid image.
+    """
+    if not images:
+        raise ValueError("The list of images is empty.")
+
+    # Determine the number of rows and columns if not provided
+    if rows is None and cols is None:
+        total_images = len(images)
+        rows = int(np.ceil(np.sqrt(total_images)))
+        cols = rows
+    elif rows is None:
+        rows = int(np.ceil(len(images) / cols))
+    elif cols is None:
+        cols = int(np.ceil(len(images) / rows))
+
+    # Determine the height and width of each sub-image
+    if len(images) > 0:
+        sub_height, sub_width = images[0].shape[:2]
+    else:
+        sub_height, sub_width = 0, 0
+
+    # Create a new blank image with appropriate dimensions
+    grid_height = rows * sub_height
+    grid_width = cols * sub_width
+    grid_image = np.zeros((grid_height, grid_width, 3), dtype=np.uint8)
+
+    # Paste each sub-image into the grid
+    for i, img in enumerate(images):
+        x = (i % cols) * sub_width
+        y = (i // cols) * sub_height
+        grid_image[y:y+sub_height, x:x+sub_width] = img
+
+    # Fill remaining spaces with the fill_color
+    for i in range(rows * cols):
+        if i >= len(images):
+            x = (i % cols) * sub_width
+            y = (i // cols) * sub_height
+            grid_image[y:y+sub_height, x:x+sub_width] = fill_color
+
+    return grid_image
 
 def print_config(config: PipelineConfig):
     """Prints the PipelineConfig"""

@@ -11,7 +11,7 @@ class PointPicker:
         if event == cv2.EVENT_LBUTTONDOWN:
             if len(self.points) < 4:
                 self.points.append([x, y])
-                # Draw a red dot to show where you clicked
+                # Draw a red dot to show clicked points
                 cv2.circle(self.display_frame, (x, y), 6, (0, 0, 255), -1)
                 cv2.imshow(self.window_name, self.display_frame)
                 

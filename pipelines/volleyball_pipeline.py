@@ -187,11 +187,6 @@ class VolleyballPipeline:
         # print("detected_corners")
         # print(detected_corners)
 
-        # if (self.run_detect):
-        #     # Run Object Detection
-        #     results = self.detector.detect(frame)
-        #     detections = dict_to_list(results)
-
         # Map Player Coordinates
         for det in raw_detections:
             x1, y1, x2, y2 = det["xyxy"]

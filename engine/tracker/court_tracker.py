@@ -3,9 +3,14 @@ import numpy as np
 
 from engine.tracker.lk_tracker import *
 from engine.detection.hough_detector import *
+from utils.utils import *
+from data_manager.output_manager import PipelineDebugger
 
 class CourtTracker:
-    def __init__(self, ema_alpha=0.15, hough_interval=60):
+    def __init__(self, ema_alpha=0.15, hough_interval=60, debugger : PipelineDebugger = None):
+        # Frame Debugger
+        self.debugger = debugger
+
         # Hyperparameters
         self.ema_alpha = ema_alpha          # Smoothing factor (0.0 to 1.0)
         self.hough_interval = hough_interval
@@ -13,7 +18,7 @@ class CourtTracker:
         # Specialized engines
         self.masker = DynamicCourtMasker()
         self.lk = LKTracker()
-        self.hough = HoughDetector()
+        self.hough = HoughDetector(on_debug=debugger.add)
 
         # State encapsulation
         self.current_matrix = None
@@ -90,8 +95,9 @@ class CourtTracker:
 
     def debug_draw_lk_mask(self, frame, mask):
         if mask is not None:
-            # Show the raw black-and-white mask
-            cv2.imshow("Debug: Floor Mask", mask)
+            if self.debugger is None:
+                # Show the raw black-and-white mask
+                cv2.imshow("Debug: Floor Mask", mask)
             
             # Create green overlay on the original frame
             green_overlay = np.zeros_like(frame)
@@ -102,4 +108,11 @@ class CourtTracker:
             
             # Blend with the original frame
             debug_view = cv2.addWeighted(frame, 1.0, masked_green, 0.3, 0)
-            cv2.imshow("Debug: Mask Overlay", debug_view)
+
+            if self.debugger is None:
+                cv2.imshow("Debug: Mask Overlay", debug_view)
+
+            combined_view = stitch_two_frames(mask, debug_view)
+            return combined_view
+
+        return None

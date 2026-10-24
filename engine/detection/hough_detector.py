@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 class HoughDetector:
-    def __init__(self):
+    def __init__(self, on_debug=None):
         self.lower_color = np.array([0, 0, 200]) 
         self.upper_color = np.array([180, 50, 255])
 
@@ -21,6 +21,12 @@ class HoughDetector:
                             "top_sideline": [[0, 0], [1800, 0]],
                             "bottom_sideline": [[0, 900], [1800, 900]]
                         }
+
+        self.is_show_debug = True
+        self.on_debug = on_debug
+
+        if callable(self.on_debug):
+            self.is_show_debug = False
 
     def _line_intersection(self, line1, line2):
         # Unpack the lines [x1, y1, x2, y2]
@@ -201,20 +207,26 @@ class HoughDetector:
         #     return None
 
         formatted_lines = raw_lines
-        debug_frame = frame.copy()
 
         # master_h, master_v = self.merge_overlapping_lines(formatted_lines, distance_threshold=15)
         # self.debug_draw_master_lines(debug_frame, master_h, master_v)
 
         if formatted_lines is None:
             return None
-        
+
+        return formatted_lines
+
+    def debug_draw_hough_detection(self, frame, formatted_lines):
+        debug_frame = frame.copy()
         for line in formatted_lines:
             x1, y1, x2, y2 = line[0]
             cv2.line(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
-        cv2.imshow("debug_frame", debug_frame)
 
-        return formatted_lines
+        if self.is_show_debug:
+            cv2.imshow("debug_frame", debug_frame)
+            cv2.waitKey(1)
+
+        return debug_frame
 
     def debug_draw_master_lines(self, frame, master_h, master_v):
         """
@@ -243,8 +255,9 @@ class HoughDetector:
             # Draw in Red (BGR format: 0, 0, 255), thickness 3
             cv2.line(debug_frame, (x1, 0), (x2, height), (0, 0, 255), 3)
 
-        cv2.imshow("Debug: Merged Master Lines", debug_frame)
-        cv2.waitKey(1)
+        if self.is_show_debug:
+            cv2.imshow("Debug: Merged Master Lines", debug_frame)
+            cv2.waitKey(1)
         
         return debug_frame
 
@@ -275,8 +288,9 @@ class HoughDetector:
                     y2 = int(slope * x2 + intercept)
                     cv2.line(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
 
-        cv2.imshow("Debug: Fitted Lines", debug_frame)
-        cv2.waitKey(1)
+        if self.is_show_debug:
+            cv2.imshow("Debug: Fitted Lines", debug_frame)
+            cv2.waitKey(1)
         
         return debug_frame
 
@@ -305,8 +319,9 @@ class HoughDetector:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2
                 )
                 
-        cv2.imshow("Debug: Intersections", debug_frame)
-        cv2.waitKey(1)
+        if self.is_show_debug:
+            cv2.imshow("Debug: Intersections", debug_frame)
+            cv2.waitKey(1)
         
         return debug_frame
 
@@ -620,6 +635,9 @@ class HoughDetector:
 
     def detect(self, frame, current_H):
         raw_lines = self.supercharged_line_detection(frame)
+        debug_frame = self.debug_draw_hough_detection(frame, raw_lines)
+        if callable(self.on_debug):
+            self.on_debug("Hough Raw", debug_frame)
 
         if raw_lines is not None:
             # Ghost Matcher sorts them into buckets
@@ -627,11 +645,15 @@ class HoughDetector:
             
             # Fit the grouped detected lines 
             final_lines = self.fit_lines(categorized_buckets)
-            self.debug_draw_fit_lines(frame, final_lines)
+            debug_frame = self.debug_draw_fit_lines(frame, final_lines)
+            if callable(self.on_debug):
+                self.on_debug("Fitted Lines", debug_frame)
             
             # Extract new detected corners
             detected_corner, dst_pts = self.extract_corners(final_lines)
-            self.debug_draw_corners(frame, detected_corner)
+            debug_frame = self.debug_draw_corners(frame, detected_corner)
+            if callable(self.on_debug):
+                self.on_debug("Intersections", debug_frame)
             
             # Feeding to the next cycle
             if detected_corner is not None:
