@@ -123,7 +123,7 @@ class TeamClassifier:
         if is_near_net and is_out_of_bounds:
             self.locked_teams[player.track_id] = "Referee"
             player.team_id = "Referee"
-            print("referee")
+            # print("referee")
             return
 
         print("player.map_coords")
@@ -132,7 +132,7 @@ class TeamClassifier:
             player.map_coords.x < -200 or player.map_coords.x > self.court_size.x + 200:
             self.locked_teams[player.track_id] = "Unknown"
             player.team_id = "Unknown"
-            print("unknwodn")
+            # print("unknwodn")
             return
 
         is_left_side = player.map_coords.x < self.net_x
@@ -149,7 +149,7 @@ class TeamClassifier:
         # Lock in memory
         self.locked_teams[player.track_id] = assigned_team
         player.team_id = assigned_team
-        print(assigned_team)
+        # print(assigned_team)
 
     def reset(self):
         """Clean all caches"""

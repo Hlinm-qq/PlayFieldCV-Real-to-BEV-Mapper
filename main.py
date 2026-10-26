@@ -1,4 +1,5 @@
 import time
+import random, numpy as np, torch, cv2
 
 from engine.detection.yolo_engine import *
 from engine.detection.preprocessor import *
@@ -557,7 +558,6 @@ def tracker_pipeline_v2_nonpose(config: PipelineConfig, device):
     output_manager = OutputManager()
     engine_manager = EngineManager(EngineType.ULTRALYTICSYOLO, config.model_path, config.use_wrapper)
     visualizer = Visualizer(canvas_w, canvas_h, config.map_padding)
-    content_size = visualizer.get_content_size()
     projector = FieldProjector(src_points, canvas_w, canvas_h, config.map_padding)
     
     # Determine what FPS we are trying to follow
@@ -973,10 +973,16 @@ def flow4(config: PipelineConfig, device):
         point_picker = PointPicker()
         src_points = point_picker.get_points(first_frame)
     else:
+        # point_picker = PointPicker()
+        # src_points = point_picker.get_points(first_frame)
+        
         # Left back area
-        # DEFAULT_SRC_POINTS = np.float32([[147, 329], [291, 333], [269, 483], [81, 474]])
-        src_points = DEFAULT_SRC_POINTS
+        # DEFAULT_SRC_POINTS: np.float32([[147, 329], [291, 333], [269, 483], [81, 474]])
+        src_points = DEFAULT_SRC_POINTS.copy()
+    # src_points = np.asarray(src_points, dtype=np.float32).reshape(-1, 2)
     dst_points = court_zone.get("dst_pts")
+
+    print(src_points)
 
     output_manager = OutputManager()
     debug_manager = PipelineDebugger(enabled=config.debug_enable, resolution=config.debug_resolution, cols=config.debug_cols, rows=config.debug_rows)
@@ -987,6 +993,7 @@ def flow4(config: PipelineConfig, device):
     team_classifer = TeamClassifier(Vector2D(COURT_LENGTH, COURT_WIDTH))
     pipeline = VolleyballPipeline(court_detector, yolo_engine, projector, team_classifer, run_detect=config.is_run_detect)
     delay_buffer = DelayBuffer(buffer_size=config.buffer_size, mapper_handler=projector)
+    dashboard = AsymmetricDashboard("720p")
 
     pipeline.initialize(first_frame, src_points, dst_points)
 
@@ -1013,6 +1020,7 @@ def flow4(config: PipelineConfig, device):
             # Initialize video writer
             output_manager.init_video_writer(output_video_fps, video_width, video_height)
 
+    
     frame_idx = 1
     try:
         for raw_frame in stream.get_frame():
@@ -1044,7 +1052,8 @@ def flow4(config: PipelineConfig, device):
                 process_time = time.time() - loop_start_time
 
                 # Render outputs
-                canvas = visualizer.draw_empty_court()
+                # canvas = visualizer.draw_empty_court()
+                map_players_data = []
                 for p in result.players:
                     cv2.rectangle(frame, (int(p.bbox.x1), int(p.bbox.y1)), (int(p.bbox.x2), int(p.bbox.y2)), (0, 0, 255), 2)
                     cv2.circle(frame, (int(p.src_coords.x), int(p.src_coords.y)), 5, (255, 0, 0), -1)
@@ -1055,7 +1064,15 @@ def flow4(config: PipelineConfig, device):
                     if p.team_id == "":
                         p.team_id = team_classifer.get_locked_team(p.track_id)
                     color = COLOR_CONFIG.get(p.team_id.lower(), (0,0,0))
-                    visualizer.draw_player_on_map(canvas, p.map_coords.x, p.map_coords.y, p.track_id, color)
+                    # visualizer.draw_player_on_map(canvas, p.map_coords.x, p.map_coords.y, p.track_id, color)
+
+                    map_players_data.append({
+                        "math_x": p.map_coords.x,
+                        "math_y": p.map_coords.y,
+                        "id": p.track_id,
+                        "color": color,
+                        "team_id": p.team_id.lower()
+                    })
 
                     # print(f"player: {p.track_id} | {p.confidence} | {print_vector(p.src_coords)} | {print_vector(p.map_coords)}")
 
@@ -1081,13 +1098,22 @@ def flow4(config: PipelineConfig, device):
                 print(f"Target FPS: {target_fps if target_fps > 0 else 'MAX'}")
                 print(f"Actual FPS: {int(actual_fps)}")
 
+                # Render court datas
+                map_bev = visualizer.render(target_w=dashboard.hero_w, target_h=dashboard.hero_h, players=map_players_data)
+                # Route output to dashboard
+                dashboard.add_view("hero", map_bev, "Volleyball BEV")
+                dashboard.add_view("aux", frame, "Raw Detection")
+
+                final_view = dashboard.render()
                 debug_manager.show()
 
-                if config.is_combine_result:
-                    # Glue the two images together horizontally
-                    combined_view = stitch_two_frames(frame, canvas)
-                    print(get_frame_stats(combined_view))
-                    # combined_view = cv2.resize(combined_view, (1500, 700)) 
+                # if config.is_combine_result:
+                #     # Glue the two images together horizontally
+                #     combined_view = stitch_two_frames(frame, canvas)
+                #     print(get_frame_stats(combined_view))
+                #     # combined_view = cv2.resize(combined_view, (1500, 700)) 
+                
+                combined_view = final_view
                 
                 if config.save_video:
                     if config.is_combine_result:
@@ -1096,7 +1122,7 @@ def flow4(config: PipelineConfig, device):
                 # Display result
                 if not config.is_combine_result:
                     key_pressed = output_manager.display_frame(frame, "Original Detection")
-                    key_pressed2 = output_manager.display_frame(canvas, "2D Map")
+                    # key_pressed2 = output_manager.display_frame(canvas, "2D Map")
                     if key_pressed == ord('q'): break
                     if key_pressed2 == ord('q'): break
                 else:
@@ -1125,6 +1151,13 @@ def flow4(config: PipelineConfig, device):
     return True
 
 def main():
+    SEED = 0
+    random.seed(SEED); np.random.seed(SEED)
+    torch.manual_seed(SEED); torch.cuda.manual_seed_all(SEED)
+    cv2.setRNGSeed(SEED)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     print("PyTorch version:", torch.__version__)
     print("CUDA available:", torch.cuda.is_available())
     if torch.cuda.is_available():
@@ -1184,11 +1217,11 @@ def main():
                             save_video=False,
                             map_padding=200, 
                             class_id_filter=target_classes,
-                            is_manual_picker=True,
-                            frame_count=40, 
+                            is_manual_picker=False,
+                            frame_count=80, 
                             model_path="yolov8s.pt",
                             sleep_second=2,
-                            map_orientation="horizontal",
+                            map_orientation="vertical",
                             is_run_detect=True,
                             recalibration_rate=2,
                             buffer_size=5,

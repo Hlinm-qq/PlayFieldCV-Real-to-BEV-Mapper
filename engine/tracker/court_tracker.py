@@ -28,7 +28,7 @@ class CourtTracker:
         self.masker.initialize(frame, src_corners)
         initial_mask = self.masker.get_mask(frame)
         self.lk.initialize(frame, src_corners, base_dst_points, initial_mask)
-        
+
         self.current_matrix, _ = cv2.findHomography(src_corners, base_dst_points)
 
     def update(self, frame, frame_idx, player_detection = None):

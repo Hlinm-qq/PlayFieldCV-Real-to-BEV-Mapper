@@ -1,0 +1,7 @@
+tracker_type: bytetrack
+track_high_thresh: 0.20    # confidence threshold for stage 1 association
+track_low_thresh: 0.05     # confidence threshold for stage 2 recovery
+new_track_thresh: 0.20     # Threshold required to spawn a brand new track
+track_buffer: 60           # Frames to remember a lost player (2 seconds at 30fps)
+match_thresh: 0.80         # IoU distance threshold for Kalman filter matching
+fuse_score: True           # Multiply classification score with IoU

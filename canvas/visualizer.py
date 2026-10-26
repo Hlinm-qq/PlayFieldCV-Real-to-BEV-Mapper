@@ -2,121 +2,140 @@ import cv2
 import numpy as np
     
 class Visualizer:
-    def __init__(self, court_length=1800, court_width=900, padding=50, orientation="horizontal"):
+    def __init__(self, math_len=1800, math_width=900, math_pad=300, orientation="horizontal"):
         """
-        court_length: The long side of the court (X-axis in math)
-        court_width: The short side of the court (Y-axis in math)
-        orientation: "horizontal" or "vertical"
+        Args:
+            math_len: Court baseline-to-baseline length
+            math_width: Court sideline-to-sideline width
+            math_pad: Out-of-bounds free zone on all sides
+                        Increase this to zoom out and see more out-of-bounds space;
+                        decrease to zoom in tightly on the court.
+            orientation: 'horizontal' or 'vertical'.
         """
+        self.math_len = math_len
+        self.math_width = math_width
+        self.math_pad = math_pad
         self.orientation = orientation
-        self.padding = padding
-        self.math_len = court_length
-        self.math_wid = court_width
 
-        # Screen dimensions flip based on orientation
-        if self.orientation == "vertical":
-            self.screen_w = court_width + (padding * 2)
-            self.screen_h = court_length + (padding * 2)
-        else:
-            self.screen_w = court_length + (padding * 2)
-            self.screen_h = court_width + (padding * 2)
+        # Total viewable range including out-of-bounds areas
+        self.total_len = self.math_len + (2 * self.math_pad)
+        self.total_width = self.math_width + (2 * self.math_pad)
 
-    def draw_empty_court(self):
-        """Draws a fresh 2D volleyball court canvas."""
-        canvas = np.zeros((self.screen_h, self.screen_w, 3), dtype=np.uint8)
-                
-        # Background Color
-        canvas[:] = (80, 150, 220) 
-        # Line Color
+        # OpenCV Sub-pixel anti-aliasing (16 sub-steps)
+        self.SHIFT = 4
+        self.SCALE = 1 << self.SHIFT
+
+    def render(self, target_w: int, target_h: int, players: list[dict]) -> np.ndarray:
+        # Canvas color
+        canvas = np.full((target_h, target_w, 3), (80, 150, 220), dtype=np.uint8)
+        court_color = (220, 150, 80)  # BGR
         line_color = (255, 255, 255)
 
-        p = self.padding
-        w = self.screen_w - p
-        h = self.screen_h - p
+        # Fit total viewable area (court + padding) into the target UI cell
+        if self.orientation == "horizontal":
+            total_aspect = self.total_len / self.total_width
+        else:
+            total_aspect = self.total_width / self.total_len
 
-        # Draw Outer Boundary
-        cv2.rectangle(canvas, (p, p), (w, h), line_color, 4)
+        if (target_w / target_h) > total_aspect:
+            view_h = target_h
+            view_w = int(view_h * total_aspect)
+        else:
+            view_w = target_w
+            view_h = int(view_w / total_aspect)
 
-        # Court side agenda
+        # Offsets to center the entire viewable box inside the cell
+        ox = (target_w - view_w) // 2
+        oy = (target_h - view_h) // 2
+
+        # Math -> Canvas Sub-Pixel Mapping
+        def tf(math_x, math_y):
+            # Normalize with respect to the total bounding area (including padding)
+            nx = (math_x + self.math_pad) / self.total_len
+            ny = (math_y + self.math_pad) / self.total_width
+
+            if self.orientation == "vertical":
+                # Rotated 90 degrees: width along X, length along Y
+                px = ox + (ny * view_w)
+                py = oy + ((1.0 - nx) * view_h)
+            else:
+                px = ox + (nx * view_w)
+                py = oy + (ny * view_h)
+
+            return (int(round(px * self.SCALE)), int(round(py * self.SCALE)))
+
+        # Draw Court Floor (Only the playing field inside lines, not the padding)
+        c_top_left = tf(0, 0)
+        c_bot_right = tf(self.math_len, self.math_width)
+        
+        # Recover integer pixel corners for floor fill
+        p1 = (c_top_left[0] >> self.SHIFT, c_top_left[1] >> self.SHIFT)
+        p2 = (c_bot_right[0] >> self.SHIFT, c_bot_right[1] >> self.SHIFT)
+        
+        # Draw colored surface
+        cv2.rectangle(canvas, p1, p2, court_color, -1)
+
+        # Draw Perimeter Lines
+        corners = [
+            tf(0, 0),
+            tf(self.math_len, 0),
+            tf(self.math_len, self.math_width),
+            tf(0, self.math_width)
+        ]
+        for i in range(4):
+            cv2.line(canvas, corners[i], corners[(i + 1) % 4], line_color, 3, cv2.LINE_AA, shift=self.SHIFT)
+
+        # Draw Net & Attack Lines
+        net_x = self.math_len / 2
+        attack_offset = self.math_len / 6
+
+        cv2.line(canvas, tf(net_x, 0), tf(net_x, self.math_width), (240, 240, 240), 5, cv2.LINE_AA, shift=self.SHIFT)
+        cv2.line(canvas, tf(net_x - attack_offset, 0), tf(net_x - attack_offset, self.math_width), line_color, 2, cv2.LINE_AA, shift=self.SHIFT)
+        cv2.line(canvas, tf(net_x + attack_offset, 0), tf(net_x + attack_offset, self.math_width), line_color, 2, cv2.LINE_AA, shift=self.SHIFT)
+
+        # Draw Agendas
         text1 = "LEFT"
         text2 = "RIGHT"
         font = cv2.FONT_HERSHEY_SIMPLEX
-
-        draw_x1 = p
-        draw_y1 = p + self.math_len + 30
-        draw_x2 = p
-        draw_y2 = p - 15
+        font_scale = max(0.4, view_w * 0.0006)
+        font_thickness = 2
+        text_size2 = cv2.getTextSize(text2, font, font_scale, font_thickness)[0]
         
-        if self.orientation == "vertical": # "vertical"
-            # Net is a horizontal line in the middle
-            net_y = p + (self.math_len // 2)
-            cv2.line(canvas, (p, net_y), (w, net_y), line_color, 6)
-            # Attack lines
-            attack_offset = self.math_len // 6
-            cv2.line(canvas, (p, net_y - attack_offset), (w, net_y - attack_offset), line_color, 2)
-            cv2.line(canvas, (p, net_y + attack_offset), (w, net_y + attack_offset), line_color, 2)
-        else: # horizontal
-            # Net is a vertical line in the middle
-            net_x = p + (self.math_len // 2)
-            # print("net_x")
-            # print(net_x)
-            cv2.line(canvas, (net_x, p), (net_x, h), line_color, 6)
-            # Attack lines (3 meters = 1/6 of length)
-            attack_offset = self.math_len // 6
-            cv2.line(canvas, (net_x - attack_offset, p), (net_x - attack_offset, h), line_color, 2)
-            cv2.line(canvas, (net_x + attack_offset, p), (net_x + attack_offset, h), line_color, 2)
+        # Place labels
+        l_pt = tf(0, 0)
+        r_pt = tf(self.math_len, 0)
+        r_pt_v = tf(self.math_len, self.math_width)
+        lx, ly = l_pt[0] >> self.SHIFT, l_pt[1] >> self.SHIFT
+        rx, ry = r_pt[0] >> self.SHIFT, r_pt[1] >> self.SHIFT
+        rx_v, ry_v = r_pt_v[0] >> self.SHIFT, r_pt_v[1] >> self.SHIFT
 
-            draw_x1 = p
-            draw_y1 = p - 15
-            text_size2 = cv2.getTextSize(text2, font, 1, 2)[0]
-            draw_x2 = p + self.math_len - text_size2[0]
-            draw_y2 = draw_y1
-        
-        cv2.putText(canvas, text1, 
-                    (draw_x1, draw_y1), 
-                    font, 1, (255, 0, 0), 2)
-        cv2.putText(canvas, text2, 
-                    (draw_x2, draw_y2), 
-                    font, 1, (0, 0, 255), 2)
-
-        return canvas
-
-    def draw_player_on_map(self, canvas, math_x, math_y, player_id, color: tuple = (0, 255, 0)):
-        """
-        Draws a dot and ID on the 2D map, math_x and math_y is horizontal based.
-        shifts them into the pixel window, and draws them if they fit on screen.
-        """
-        # Convert Math Space to Pixel Space (Handling the orientation flip)
         if self.orientation == "vertical":
-            draw_x = self.padding + math_y
-            draw_y = self.padding + (self.math_len - math_x)
-            
-        else: # Rotate 90 degrees clockwise
-            draw_x = self.padding + math_x
-            draw_y = self.padding + math_y
-
-        # Convert to integers for drawing pixels
-        draw_x = int(draw_x)
-        draw_y = int(draw_y)
-
-        # Limit Check
-        if 0 <= draw_x <= self.screen_w and 0 <= draw_y <= self.screen_h:
-            # Draw the player (as dot)
-            cv2.circle(canvas, (draw_x, draw_y), 8, color, -1)
-
-            text = str(player_id)
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            text_size = cv2.getTextSize(text, font, 0.6, 2)[0]
-            cv2.putText(canvas, text, 
-                        (draw_x - (text_size[0] // 2), draw_y - 15), 
-                        font, 0.6, (255, 255, 255), 2)
+            cv2.putText(canvas, text1, (lx, ly + 15), font, font_scale, (255, 0, 0), font_thickness)
+            cv2.putText(canvas, text2, (rx, ry - 5), font, font_scale, (0, 0, 255), font_thickness)
         else:
-            pass 
-            
+            cv2.putText(canvas, text1, (lx, ly - 5), font, font_scale, (255, 0, 0), font_thickness)
+            cv2.putText(canvas, text2, (rx - text_size2[0], ry - 5), font, font_scale, (0, 0, 255), font_thickness)
+
+        # Draw Players
+        dot_radius = max(3, int(min(target_w, target_h) * 0.005))
+        sub_radius = dot_radius * self.SCALE
+
+        for p in players:
+            center = tf(p["math_x"], p["math_y"])
+            px = center[0] >> self.SHIFT
+            py = center[1] >> self.SHIFT
+
+            # Draw if player is anywhere within visible target cell bounds
+            if 0 <= px < target_w and 0 <= py < target_h:
+                cv2.circle(canvas, center, sub_radius + (2 * self.SCALE), (10, 10, 10), -1, cv2.LINE_AA, shift=self.SHIFT)
+                cv2.circle(canvas, center, sub_radius, p["color"], -1, cv2.LINE_AA, shift=self.SHIFT)
+
+                if "id" in p :
+                    if "team" in p["team_id"]:
+                        cv2.putText(canvas, str(p["id"]), (px - 6, py - 12),
+                                    font, font_scale * 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+
         return canvas
-    
-    def get_content_size(self):
-        return self.content_size
 
 class FieldProjector:
     def __init__(self, src_points, canvas_width, canvas_height, dst_points=None, padding=0, is_dynamic=False):

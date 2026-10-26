@@ -125,6 +125,8 @@ class HoughDetector:
 
         height, width = frame.shape[:2]
         cutoff_y = int(height * 0.40) # percentage (0.40 = 40%)
+
+        # print(height, width)
        
         # Black out the crowd (Top 40% of the screen)
         roi_frame = frame.copy() 
@@ -302,11 +304,7 @@ class HoughDetector:
         
         if corners is not None:
             # Loop through the 4 corners
-            # print("corners")
-            # print(corners)
             for i, pt in enumerate(corners):
-                # print("pt")
-                # print(pt)
                 # Extract the raw x and y integers from the nested array
                 x, y = int(pt[0][0]), int(pt[0][1])
                 
@@ -577,15 +575,15 @@ class HoughDetector:
             verticals_found = [final_court_lines["left_attackline"], final_court_lines["right_baseline"]]
             dst_pts_list = [[600, 0], [1800, 0], [600, 900], [1800, 900]]
 
-        # Left back + left attack areas
-        elif "left_baseline" in keys and "center_line" in keys:
-            verticals_found = [final_court_lines["left_baseline"], final_court_lines["center_line"]]
-            dst_pts_list = [[0, 0], [900, 0], [0, 900], [900, 900]]
+        # # Left back + left attack areas
+        # elif "left_baseline" in keys and "center_line" in keys:
+        #     verticals_found = [final_court_lines["left_baseline"], final_court_lines["center_line"]]
+        #     dst_pts_list = [[0, 0], [900, 0], [0, 900], [900, 900]]
 
-        # Right attack + right back areas
-        elif "center_line" in keys and "right_baseline" in keys:
-            verticals_found = [final_court_lines["center_line"], final_court_lines["right_baseline"]]
-            dst_pts_list = [[900, 0], [1800, 0], [900, 900], [1800, 900]]
+        # # Right attack + right back areas
+        # elif "center_line" in keys and "right_baseline" in keys:
+        #     verticals_found = [final_court_lines["center_line"], final_court_lines["right_baseline"]]
+        #     dst_pts_list = [[900, 0], [1800, 0], [900, 900], [1800, 900]]
 
         # left attack + right attack areas
         elif "left_attackline" in keys and "right_attackline" in keys:
@@ -602,15 +600,15 @@ class HoughDetector:
             verticals_found = [final_court_lines["right_attackline"], final_court_lines["right_baseline"]]
             dst_pts_list = [[1200, 0], [1800, 0], [1200, 900], [1800, 900]]
 
-        # Left attack area
-        elif "left_attackline" in keys and "center_line" in keys:
-            verticals_found = [final_court_lines["left_attackline"], final_court_lines["center_line"]]
-            dst_pts_list = [[600, 0], [900, 0], [600, 900], [900, 900]]
+        # # Left attack area
+        # elif "left_attackline" in keys and "center_line" in keys:
+        #     verticals_found = [final_court_lines["left_attackline"], final_court_lines["center_line"]]
+        #     dst_pts_list = [[600, 0], [900, 0], [600, 900], [900, 900]]
 
-        # Right attack area
-        elif "center_line" in keys and "right_attackline" in keys:
-            verticals_found = [final_court_lines["center_line"], final_court_lines["right_attackline"]]
-            dst_pts_list = [[900, 0], [1200, 0], [900, 900], [1200, 900]]
+        # # Right attack area
+        # elif "center_line" in keys and "right_attackline" in keys:
+        #     verticals_found = [final_court_lines["center_line"], final_court_lines["right_attackline"]]
+        #     dst_pts_list = [[900, 0], [1200, 0], [900, 900], [1200, 900]]
         else:
             return None, None
 

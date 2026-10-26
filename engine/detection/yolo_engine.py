@@ -1,5 +1,7 @@
 import numpy as np
+from pathlib import Path
 from enum import Enum, IntFlag, auto
+
 from ultralytics import YOLO
 
 class EngineType(Enum):
@@ -21,10 +23,24 @@ class ModelType(Enum):
     TRACKING = 2
 
 class EngineManager:
-    def __init__(self, type: EngineType, weight_path, using_raw=False, device=None, use_tracking=False, is_video=False, id_filter=None):
+    def __init__(
+            self, 
+            type: EngineType, 
+            weight_path, 
+            using_raw=False, 
+            device=None, 
+            use_tracking=False, 
+            is_video=False, 
+            id_filter=None,
+            imgsz=1280,
+            conf=0.1,
+            iou=0.5,         # NMS overlap threshold
+            tracker_config="aavolleyball_tracker.yaml"
+        ):
+        
+        self.engine_type: EngineType = type
         self.weight_path = weight_path
         self.using_raw = using_raw
-        self.engine_type: EngineType = type
         self.device = device 
 
         self.use_tracking = use_tracking
@@ -33,12 +49,33 @@ class EngineManager:
         self.model = None
         self.class_id_filter = id_filter
 
+        self.imgsz = imgsz
+        self.conf = conf
+        self.iou = iou
+        self.tracker_config = self._resolve_tracker_config(tracker_config)
+
         self.load_model(self.using_raw)
-        self.model.to(self.device)
+        if self.device:
+            self.model.to(self.device)
 
         # # Warmup
         # dummy_frame = np.zeros((640, 640, 3), dtype=np.uint8)
         # self.model(dummy_frame)
+
+    def _resolve_tracker_config(self, config_target: str) -> str:
+        target = Path(config_target)
+
+        if target.is_file():
+            return str(target.resolve())
+
+        project_root = Path(__file__).resolve().parent.parent.parent
+        local_config = project_root / "config" / target.name
+
+        if local_config.is_file():
+            return str(local_config.resolve())
+
+        print(f"WARNING: Custom config '{config_target}' not found. Falling back to default 'bytetrack.yaml'.")
+        return "bytetrack.yaml"
 
     def load_model(self, is_raw=False):
         """
@@ -102,33 +139,27 @@ class EngineManager:
         return entry
 
     def detect(self, frame):
-        if not self.use_tracking:
-            outputs = self.model(frame, classes=self.class_id_filter)
+        if self.use_tracking:
+            outputs = self.model.track(
+                source=frame,
+                persist=True,
+                tracker=self.tracker_config,
+                conf=self.conf,
+                iou=self.iou,
+                imgsz=self.imgsz,
+                classes=self.class_id_filter,
+                verbose=False
+            )
         else:
-            outputs = self.model.track(frame, persist=True, conf=0.1, classes=self.class_id_filter)
-
+            outputs = self.model.predict(
+                source=frame,
+                conf=self.conf,
+                iou=self.iou,
+                imgsz=self.imgsz,
+                classes=self.class_id_filter,
+                verbose=False
+            )
         results = self.get_output(outputs, BoxFormat.XYXY | BoxFormat.CONFIDENCE | BoxFormat.ID)
-        # detections = dict_to_list(results)
-
-        # detected_players = []
-        # for det in detections:
-        #     x1, y1, x2, y2 = det["xyxy"]
-        #     new_bbox = BBox(x1, y1, x2, y2)
-
-        #     # Calculate foot coordinate (bottom center of bounding box)
-        #     src_coords = new_bbox.bottom_center
-
-        #     map_x, map_y = self.mapper.get_map_coordinate(src_coords.x, src_coords.y, current_H)
-        #     map_coords = Vector2D(map_x, map_y)
-
-        #     found_player = PlayerDetection(
-        #         track_id=-1, 
-        #         bbox=new_bbox, 
-        #         src_coords=src_coords, 
-        #         map_coords=map_coords, 
-        #         confidence=0.0
-        #     )
-        #     detected_players.append(found_player)
 
         return results
           
