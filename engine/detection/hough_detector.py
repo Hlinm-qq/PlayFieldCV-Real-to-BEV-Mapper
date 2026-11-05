@@ -563,17 +563,20 @@ class HoughDetector:
         if "left_baseline" in keys and "right_baseline" in keys:
             verticals_found = [final_court_lines["left_baseline"], final_court_lines["right_baseline"]]
             # 2D Blueprint Coordinates (Scale: 100px = 1m)
-            dst_pts_list = [[0, 0], [1800, 0], [0, 900], [1800, 900]]
+            # dst_pts_list = [[0, 0], [1800, 0], [0, 900], [1800, 900]]
+            dst_pts_list = [[0, 0], [1800, 0], [1800, 900], [0, 900]]
 
         # Left back + left attack + right attack areas
         elif "left_baseline" in keys and "right_attackline" in keys:
             verticals_found = [final_court_lines["left_baseline"], final_court_lines["right_attackline"]]
-            dst_pts_list = [[0, 0], [1200, 0], [0, 900], [1200, 900]]
+            # dst_pts_list = [[0, 0], [1200, 0], [0, 900], [1200, 900]]
+            dst_pts_list = [[0, 0], [1200, 0], [1200, 900], [0, 900]]
 
         # Left attack + right attack + right back areas
         elif "left_attackline" in keys and "right_baseline" in keys:
             verticals_found = [final_court_lines["left_attackline"], final_court_lines["right_baseline"]]
-            dst_pts_list = [[600, 0], [1800, 0], [600, 900], [1800, 900]]
+            # dst_pts_list = [[600, 0], [1800, 0], [600, 900], [1800, 900]]
+            dst_pts_list = [[600, 0], [1800, 0], [1800, 900], [600, 900]]
 
         # # Left back + left attack areas
         # elif "left_baseline" in keys and "center_line" in keys:
@@ -588,17 +591,19 @@ class HoughDetector:
         # left attack + right attack areas
         elif "left_attackline" in keys and "right_attackline" in keys:
             verticals_found = [final_court_lines["left_attackline"], final_court_lines["right_attackline"]]
-            dst_pts_list = [[600, 0], [1200, 0], [600, 900], [1200, 900]]
+            # dst_pts_list = [[600, 0], [1200, 0], [600, 900], [1200, 900]]
+            dst_pts_list = [[600, 0], [1200, 0], [1200, 900], [600, 900]]
 
         # Left back area
         elif "left_baseline" in keys and "left_attackline" in keys:
             verticals_found = [final_court_lines["left_baseline"], final_court_lines["left_attackline"]]
-            dst_pts_list = [[0, 0], [600, 0], [0, 900], [600, 900]]
+            # dst_pts_list = [[0, 0], [600, 0], [0, 900], [600, 900]]
+            dst_pts_list = [[0, 0], [600, 0], [600, 900], [0, 900]]
 
         # Right back area
         elif "right_attackline" in keys and "right_baseline" in keys:
             verticals_found = [final_court_lines["right_attackline"], final_court_lines["right_baseline"]]
-            dst_pts_list = [[1200, 0], [1800, 0], [1200, 900], [1800, 900]]
+            dst_pts_list = [[1200, 0], [1800, 0], [1800, 900], [1200, 900]]
 
         # # Left attack area
         # elif "left_attackline" in keys and "center_line" in keys:
@@ -626,7 +631,7 @@ class HoughDetector:
 
         # Format the outputs for OpenCV
         # Shape must be (4, 1, 2) and float32
-        src_pts = np.array([tl, tr, bl, br], dtype=np.float32).reshape(-1, 1, 2)
+        src_pts = np.array([tl, tr, br, bl], dtype=np.float32).reshape(-1, 1, 2)
         dst_pts = np.array(dst_pts_list, dtype=np.float32).reshape(-1, 1, 2)
 
         return src_pts, dst_pts

@@ -126,8 +126,8 @@ class TeamClassifier:
             # print("referee")
             return
 
-        print("player.map_coords")
-        print(player.track_id, player.map_coords)
+        # print("player.map_coords")
+        # print(player.track_id, player.map_coords)
         if player.map_coords.y < -200 or player.map_coords.y > self.court_size.y + 200 or \
             player.map_coords.x < -200 or player.map_coords.x > self.court_size.x + 200:
             self.locked_teams[player.track_id] = "Unknown"

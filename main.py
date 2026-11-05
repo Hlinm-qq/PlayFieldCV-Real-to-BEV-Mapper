@@ -986,7 +986,7 @@ def flow4(config: PipelineConfig, device):
 
     output_manager = OutputManager()
     debug_manager = PipelineDebugger(enabled=config.debug_enable, resolution=config.debug_resolution, cols=config.debug_cols, rows=config.debug_rows)
-    court_detector = CourtTracker(0.15, config.recalibration_rate, debug_manager)
+    court_detector = CourtTracker(0.15, config.recalibration_rate, debug_manager, (COURT_LENGTH, COURT_WIDTH))
     yolo_engine = EngineManager(EngineType.ULTRALYTICSYOLO, config.model_path, config.use_wrapper, device, config.enable_tracking, not is_images, config.class_id_filter)
     projector = FieldProjector(src_points, canvas_w, canvas_h, dst_points, config.map_padding)
     visualizer = Visualizer(canvas_w, canvas_h, config.map_padding, config.map_orientation)
@@ -1221,7 +1221,7 @@ def main():
                             frame_count=80, 
                             model_path="yolov8s.pt",
                             sleep_second=2,
-                            map_orientation="vertical",
+                            map_orientation="horizontal",
                             is_run_detect=True,
                             recalibration_rate=2,
                             buffer_size=5,

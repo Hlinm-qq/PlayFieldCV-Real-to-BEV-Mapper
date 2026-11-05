@@ -7,7 +7,13 @@ from utils.utils import *
 from data_manager.output_manager import PipelineDebugger
 
 class CourtTracker:
-    def __init__(self, ema_alpha=0.15, hough_interval=60, debugger : PipelineDebugger = None):
+    def __init__(
+            self, 
+            ema_alpha=0.15, 
+            hough_interval=60, 
+            debugger : PipelineDebugger = None,
+            court_size : tuple = (1800, 900)
+        ):
         # Frame Debugger
         self.debugger = debugger
 
@@ -16,59 +22,104 @@ class CourtTracker:
         self.hough_interval = hough_interval
 
         # Specialized engines
-        self.masker = DynamicCourtMasker()
+        self.masker = DynamicCourtMasker(court_length=court_size[0], court_width=court_size[1])
         self.lk = LKTracker()
         self.hough = HoughDetector(on_debug=debugger.add)
 
         # State encapsulation
         self.current_matrix = None
 
+        self.current_corners = None
+        self.base_dst_points = None
+
+        self.correction_step = None       # How much to nudge per frame
+        self.correction_frames_left = 0   # How many frames left to nudge
+
+        self.lk_failure_streak = 0
+
     def initialize(self, frame, src_corners, base_dst_points):
+        self.base_dst_points = base_dst_points.astype(np.float32).reshape(-1, 1, 2)
+        self.current_corners = src_corners.astype(np.float32).reshape(-1, 1, 2)
+                
+        self.current_matrix, _ = cv2.findHomography(self.current_corners, self.base_dst_points)
+
         # Train the color histogram on Frame 1
         self.masker.initialize(frame, src_corners)
-        initial_mask = self.masker.get_mask(frame)
+        initial_mask = self.masker.get_mask(frame, self.current_corners, self.current_matrix, self.base_dst_points)
         self.lk.initialize(frame, src_corners, base_dst_points, initial_mask)
 
-        self.current_matrix, _ = cv2.findHomography(src_corners, base_dst_points)
+        # cv2.imshow("initial_mask", initial_mask)
+        # print("init hough result")
+        # print(self.current_matrix)
+        # print(self.current_corners)
+        # print(self.base_dst_points)
 
-    def update(self, frame, frame_idx, player_detection = None):
+    def update(self, frame, frame_idx, player_detection=None):
         if self.current_matrix is None: 
             return None, None, None, None
 
-        new_matrix = None
-        lk_health = 1.0
+        # Generate floor mask using histogram backprojection
+        safe_floor_mask = self.masker.get_mask(
+            frame, self.current_corners, self.current_matrix, self.base_dst_points, player_detection
+        )
 
-        # Generate the pristine floor mask using histogram backprojection
-        safe_floor_mask = self.masker.get_mask(frame, player_detection)
-
-        # Pass the frame AND the mask to the optical flow engine
-        new_matrix, lk_health = self.lk.update_matrix(frame, safe_floor_mask)
+        # Pass frame and the mask to optical flow engine
+        new_corners, lk_health = self.lk.update_matrix(frame, safe_floor_mask)
+        
         detected_corners = None
         dst_pts = None
+        health_thres = 0.40
 
-        # Fallback to Hough if LK health is low (camera blurred, etc.)
-        if lk_health < 0.50 or frame_idx % self.hough_interval == 0:
-            # print(f"Hough calibrated")
+        if lk_health < health_thres or new_corners is None:
+            self.lk_failure_streak += 1
+        else:
+            self.lk_failure_streak = 0
+
+        needs_hough = (self.lk_failure_streak >= 4) or (frame_idx % self.hough_interval == 0)
+        
+        # Fallback to Hough if LK health is low or when recalibration
+        if needs_hough:
             hough_matrix, hough_corners, dst_pts32 = self.hough.detect(frame, self.current_matrix)
             detected_corners = hough_corners
             dst_pts = dst_pts32
 
-            if self._is_matrix_valid(hough_matrix):
-                new_matrix = hough_matrix
+            if self._validate_hough_reprojection(hough_corners, dst_pts32, max_error_units=60.0):
+                # Valid matrix mapping image -> court from the detected sub-area
+                valid_h_matrix, _ = cv2.findHomography(
+                    hough_corners.reshape(-1, 1, 2), 
+                    dst_pts32.reshape(-1, 1, 2), 
+                    cv2.RANSAC, 
+                    3.0
+                )
 
-                # Retrain color mask on the new detected area
-                self.masker.recalibrate(frame, hough_corners)
+                if valid_h_matrix is not None:
+                    h_inv = np.linalg.inv(valid_h_matrix)
+                    canonical_hough_corners = cv2.perspectiveTransform(self.base_dst_points, h_inv)
 
-                # Reset LK points to the new Hough lines
-                new_mask = self.masker.get_mask(frame)
-                self.lk.reset_points(frame, hough_corners, new_mask) 
+                    if new_corners is not None and lk_health >= 0.40:
+                        new_corners = (0.75 * new_corners) + (0.25 * canonical_hough_corners)
+                    else:
+                        new_corners = canonical_hough_corners
 
-        # If LK failed and Hough failed, freeze the matrix
-        if not self._is_matrix_valid(new_matrix):
+                    # Recalibrate masker and LK tracker
+                    self.masker.recalibrate(frame, hough_corners)
+                    new_mask = self.masker.get_mask(frame, new_corners, valid_h_matrix, dst_pts32, player_detection)
+                    self.lk.reset_points(frame, canonical_hough_corners, new_mask)
+
+        if new_corners is None:
             return self.current_matrix, safe_floor_mask, detected_corners, dst_pts
+
+        self.current_corners = new_corners.copy()
+        self.lk.corner_pixels = self.current_corners.copy()
+
+        # Update homography using smoothed canonical points
+        self.current_matrix, _ = cv2.findHomography(self.current_corners, self.base_dst_points)
+
+        print("self.current_corners")
+        print(self.current_corners)
+        print(self.current_matrix)
+        print(lk_health)
         
-        # self.current_matrix = self._apply_ema(new_matrix)
-        self.current_matrix = new_matrix
         return self.current_matrix, safe_floor_mask, detected_corners, dst_pts
 
     def _is_matrix_valid(self, matrix):
@@ -92,6 +143,27 @@ class CourtTracker:
         
         smoothed = (self.ema_alpha * new_matrix) + ((1 - self.ema_alpha) * old_matrix)
         return smoothed / smoothed[2, 2]
+
+    def _validate_hough_reprojection(self, hough_corners, dst_pts, max_error_units=60.0):
+        """
+        Validates Hough detection across variable court regions by projecting
+        image detections into canonical court coordinates via the current matrix.
+        """
+        if hough_corners is None or dst_pts is None or self.current_matrix is None:
+            return False
+
+        h_pts = hough_corners.astype(np.float32).reshape(-1, 1, 2)
+        target_pts = dst_pts.astype(np.float32).reshape(-1, 2)
+
+        # Map detected image points into court space using the active camera tracking state
+        projected_court_pts = cv2.perspectiveTransform(h_pts, self.current_matrix).reshape(-1, 2)
+
+        # Calculate Euclidean error in court metric units
+        point_errors = np.linalg.norm(projected_court_pts - target_pts, axis=1)
+        mean_error = np.mean(point_errors)
+
+        # Reject if average reprojection deviation exceeds threshold
+        return mean_error < max_error_units
 
     def debug_draw_lk_mask(self, frame, mask):
         if mask is not None:

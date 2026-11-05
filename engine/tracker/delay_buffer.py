@@ -13,25 +13,6 @@ class DelayBuffer:
         self.queue: deque[tuple[np.ndarray, FrameResult]] = deque(maxlen=buffer_size)
         self.mapper = mapper_handler
 
-    def push(self, frame, result: FrameResult):
-        """Adds a new frame to the end of the queue and repairs historical data."""
-        self.queue.append((frame, result))
-        
-        # If have enough history, run repair algorithms across the buffer
-        if len(self.queue) > 2:
-            self._interpolate_camera_loss()    # If Hough/LK totally failed, interpolate the 4 corners
-            self._interpolate_missing_players()
-
-            self._smooth_camera()              # Fix the matrix FIRST
-            self._smooth_trajectories()
-
-    def pop(self):
-        """Yields the oldest frame (N - buffer_size) which is now fully corrected."""
-        if len(self.queue) == self.buffer_size:
-            # Pop off the left side of the queue (the oldest frame)
-            return self.queue.popleft()
-        return None, None
-
     def _interpolate_missing_players(self):
         """
         Looks at the newest frame. If a player reappeared after disappearing,
@@ -236,6 +217,25 @@ class DelayBuffer:
             # Recalculate a Homography Matrix
             new_H, _ = cv2.findHomography(smoothed_corners, target_result.dst_points)
             target_result.homography_matrix = new_H
+
+    def push(self, frame, result: FrameResult):
+        """Adds a new frame to the end of the queue and repairs historical data."""
+        self.queue.append((frame, result))
+        
+        # If have enough history, run repair algorithms across the buffer
+        if len(self.queue) > 2:
+            self._interpolate_camera_loss()    # If Hough/LK totally failed, interpolate the 4 corners
+            self._interpolate_missing_players()
+
+            self._smooth_camera()              # Fix the matrix FIRST
+            self._smooth_trajectories()
+
+    def pop(self):
+        """Yields the oldest frame (N - buffer_size) which is now fully corrected."""
+        if len(self.queue) == self.buffer_size:
+            # Pop off the left side of the queue (the oldest frame)
+            return self.queue.popleft()
+        return None, None
 
     def drain(self):
         """Yields remaining frames, smoothing them using only past data."""
