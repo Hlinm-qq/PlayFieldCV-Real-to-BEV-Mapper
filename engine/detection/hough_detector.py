@@ -9,9 +9,6 @@ class HoughDetector:
         self.floor_lower = np.array([10, 50, 50])   
         self.floor_upper = np.array([30, 255, 255])
 
-        # Temporal Memory State
-        self.previous_master_lines = None
-
         self.blueprint = {
                             "left_baseline": [[0, 0], [0, 900]],
                             "left_attackline": [[600, 0], [600, 900]],
@@ -21,6 +18,16 @@ class HoughDetector:
                             "top_sideline": [[0, 0], [1800, 0]],
                             "bottom_sideline": [[0, 900], [1800, 900]]
                         }
+
+        self.blueprint_lines = {
+            "left_baseline":    {"p1": (0, 0),       "p2": (0, 900),     "type": "vertical",   "court_x": 0},
+            "left_attackline":  {"p1": (600, 0),     "p2": (600, 900),   "type": "vertical",   "court_x": 600},
+            "center_line":      {"p1": (900, 0),     "p2": (900, 900),   "type": "vertical",   "court_x": 900},
+            "right_attackline": {"p1": (1200, 0),    "p2": (1200, 900),  "type": "vertical",   "court_x": 1200},
+            "right_baseline":   {"p1": (1800, 0),    "p2": (1800, 900),  "type": "vertical",   "court_x": 1800},
+            "top_sideline":     {"p1": (0, 0),       "p2": (1800, 0),    "type": "horizontal", "court_y": 0},
+            "bottom_sideline":  {"p1": (0, 900),     "p2": (1800, 900),  "type": "horizontal", "court_y": 900}
+        }
 
         self.is_show_debug = True
         self.on_debug = on_debug
@@ -60,13 +67,12 @@ class HoughDetector:
         return lines
 
     def _point_to_line_dist(self, px, py, line_p1, line_p2):
-        """ Helper mathematical function to avoid divide-by-zero vertical line crashes """
+        """Calculate perpendicular Euclidean distance from point to infinite line"""
         x1, y1 = line_p1
         x2, y2 = line_p2
         
-        # Standard formula for perpendicular distance from a point to a line
-        numerator = abs((x2 - x1)*(y1 - py) - (x1 - px)*(y2 - y1))
-        denominator = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+        numerator = abs((y2 - y1) * px - (x2 - x1) * py + x2 * y1 - y2 * x1)
+        denominator = np.hypot(y2 - y1, x2 - x1) + 1e-6
         
         if denominator == 0: return float('inf')
         return numerator / denominator
@@ -121,10 +127,10 @@ class HoughDetector:
         
         return [int(x), int(y)]
     
-    def supercharged_line_detection(self, frame):
+    def line_detection(self, frame, current_H):
 
         height, width = frame.shape[:2]
-        cutoff_y = int(height * 0.40) # percentage (0.40 = 40%)
+        cutoff_y = int(height * 0.30) # percentage (0.40 = 40%)
 
         # print(height, width)
        
@@ -148,6 +154,7 @@ class HoughDetector:
         # # Convert to Grayscale (CLAHE works best on 1-channel images)
         # gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
         # cv2.imshow("gray", gray)
+        roi_frame = self.mask_known_decals(roi_frame, current_H)
 
         b, g, r = cv2.split(roi_frame)
         gray = b
@@ -306,7 +313,7 @@ class HoughDetector:
             # Loop through the 4 corners
             for i, pt in enumerate(corners):
                 # Extract the raw x and y integers from the nested array
-                x, y = int(pt[0][0]), int(pt[0][1])
+                x, y = int(pt[0]), int(pt[1])
                 
                 # Draw a circle
                 cv2.circle(debug_frame, (x, y), 8, (255, 255, 0), -1)
@@ -461,83 +468,131 @@ class HoughDetector:
                 
         return clean_lines
 
-    def match_lines_to_ghost_court(self, raw_lines, current_H, distance_thresh=10, angle_thresh=10):
-        """Project Ghost Lines and calculate their dynamic angles"""
-        if raw_lines is None: return None
+    def match_lines_to_ghost_court(self, raw_lines, current_H, distance_thresh=15, angle_thresh=12):
+        if raw_lines is None or len(raw_lines) == 0 or current_H is None:
+            return {}, {}, []
 
-        _, H_inv = cv2.invert(current_H)
+        try:
+            H_inv = np.linalg.inv(current_H)
+        except np.linalg.LinAlgError:
+            return {}, {}, []
         
+        # Project Ghost Lines
         ghost_lines = {}
-        for name, line_pts in self.blueprint.items():
-            pts = np.array(line_pts, dtype=np.float32).reshape(-1, 1, 2)
+        for name, line_pts in self.blueprint_lines.items():
+            pts = np.array([line_pts["p1"], line_pts["p2"]], dtype=np.float32).reshape(-1, 1, 2)
             projected = cv2.perspectiveTransform(pts, H_inv)
-            
             px1, py1 = projected[0][0]
             px2, py2 = projected[1][0]
-            
             ghost_lines[name] = {
-                "p1": (px1, py1),
-                "p2": (px2, py2),
-                "angle": self._get_line_angle(px1, py1, px2, py2) # Dynamic expected angle!
+                "p1": np.array([px1, py1], dtype=np.float32),
+                "p2": np.array([px2, py2], dtype=np.float32),
+                "angle": self._get_line_angle(px1, py1, px2, py2)
             }
 
+        # PRE-ALIGNMENT: Measure median tracking drift and nudge ghost lines
+        raw_cross_xs = []
+        for line in raw_lines:
+            x1, y1, x2, y2 = line[0]
+            # Only take lines that are roughly vertical/cross-court (angle > 45 deg)
+            ang = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1))) % 180
+            if 40 < ang < 140:
+                raw_cross_xs.append((x1 + x2) / 2.0)
+    
+        if len(raw_cross_xs) >= 3:
+            offsets = []
+            for name in ["left_baseline", "left_attackline", "center_line", "right_attackline", "right_baseline"]:
+                if name in ghost_lines:
+                    g_mid_x = (ghost_lines[name]["p1"][0] + ghost_lines[name]["p2"][0]) / 2.0
+                    dists = [rx - g_mid_x for rx in raw_cross_xs if abs(rx - g_mid_x) < distance_thresh*2]
+                    if dists:
+                        offsets.append(np.median(dists))
+    
+            if len(offsets) >= 2:
+                drift_x = np.median(offsets)
+                # Nudge all ghost lines so corridors center on raw line clusters
+                for name in ghost_lines:
+                    ghost_lines[name]["p1"][0] += drift_x
+                    ghost_lines[name]["p2"][0] += drift_x
+
         matched_results = {name: [] for name in self.blueprint.keys()}
-        
+        rejected_segments = []  # [(line_segment, reason_str)]
+
         # Filter raw lines against Ghost Lines
         for line in raw_lines:
             hx1, hy1, hx2, hy2 = line[0]
             h_angle = self._get_line_angle(hx1, hy1, hx2, hy2)
-                
+            matched = False
+
             for name, ghost in ghost_lines.items():
-                # Calculate angle difference
                 angle_diff = self._calculate_angle_diff(h_angle, ghost["angle"])
                 
-                # Check Angle
                 if angle_diff < angle_thresh:
-                    # Check Distance 
+                    # Use infinite-line distance, NOT point-to-segment distance!
                     dist1 = self._point_to_line_dist(hx1, hy1, ghost["p1"], ghost["p2"])
                     dist2 = self._point_to_line_dist(hx2, hy2, ghost["p1"], ghost["p2"])
-                    
+
                     if dist1 < distance_thresh and dist2 < distance_thresh:
                         matched_results[name].append(line[0])
+                        matched = True
                         break
-                        
-        return matched_results
 
-    def fit_lines(self, categorized_lines):
+            if not matched:
+                rejected_segments.append((line[0], "NoMatch"))
+
+        return ghost_lines, matched_results, rejected_segments
+
+    def fit_lines(self, categorized_lines, min_span_ratio=0.30):
         """
-        Takes the sorted buckets of raw segments and fits them into one line using cv2.fitLine.
+        Rejects text/logo fragments by enforcing a minimum span along the line.
+        min_span_ratio: Segments must cover at least 30% of the court dimension (>= 270 px).
         """
         final_court_lines = {}
         
-        # print("--- name, len(line_segments)")
         for name, line_segments in categorized_lines.items():
-            # print(name, len(line_segments))
             if len(line_segments) == 0:
-                continue # We didn't find any pieces of this line on this frame
-                
-            # Extract all the (x,y) points from the fragments in this bucket
+                continue
+
             all_points = []
+            total_segment_length = 0.0
+
             for segment in line_segments:
                 x1, y1, x2, y2 = segment
+                seg_len = np.hypot(x2 - x1, y2 - y1)
+                
+                # Filter out tiny text letter strokes (< 15 px)
+                if seg_len < 15.0:
+                    continue
+                    
+                total_segment_length += seg_len
                 all_points.append([x1, y1])
                 all_points.append([x2, y2])
-                
-            points_array = np.array(all_points, dtype=np.int32)
-            
-            # Fit a single, perfect infinite line through all points
-            # Returns a normalized vector (vx, vy) and a point on the line (x0, y0)
-            [vx, vy, x0, y0] = cv2.fitLine(points_array, cv2.DIST_L2, 0, 0.01, 0.01)
-            
-            # Convert vector format to slope and intercept (for intersection math)
-            if vx[0] != 0:
-                slope = vy[0] / vx[0]
-                intercept = y0[0] - (slope * x0[0])
+
+            if len(all_points) < 4:
+                continue
+
+            points_array = np.array(all_points, dtype=np.float32)
+
+            # Span Check: Ensure points are spread across the court, not bunched in one word/logo
+            # Calculate maximum Euclidean distance between any two supported endpoints
+            bbox_diag = np.ptp(points_array, axis=0) # [range_x, range_y]
+            apparent_span = np.hypot(bbox_diag[0], bbox_diag[1])
+
+            # A real court line in camera space usually spans >= 120-180 px; text clusters span < 80 px
+            if apparent_span < 100.0 or total_segment_length < 60.0:
+                continue
+
+            # Robust M-Estimator fit
+            [vx, vy, x0, y0] = cv2.fitLine(points_array, cv2.DIST_HUBER, 0, 0.01, 0.01)
+            vx, vy, x0, y0 = float(vx[0]), float(vy[0]), float(x0[0]), float(y0[0])
+
+            if abs(vx) > 1e-5:
+                slope = vy / vx
+                intercept = y0 - (slope * x0)
                 final_court_lines[name] = {"slope": slope, "intercept": intercept, "vertical": False}
             else:
-                # Handle perfectly vertical lines to prevent divide-by-zero
-                final_court_lines[name] = {"x_intercept": x0[0], "vertical": True}
-                
+                final_court_lines[name] = {"x_intercept": x0, "vertical": True}
+
         return final_court_lines
 
     def extract_corners(self, final_court_lines):
@@ -637,39 +692,196 @@ class HoughDetector:
         return src_pts, dst_pts
 
     def detect(self, frame, current_H):
-        raw_lines = self.supercharged_line_detection(frame)
+        raw_lines = self.line_detection(frame, current_H)
+        if raw_lines is None:
+            return None, None, None
         debug_frame = self.debug_draw_hough_detection(frame, raw_lines)
         if callable(self.on_debug):
             self.on_debug("Hough Raw", debug_frame)
 
-        if raw_lines is not None:
-            # Ghost Matcher sorts them into buckets
-            categorized_buckets = self.match_lines_to_ghost_court(raw_lines, current_H)
-            
-            # Fit the grouped detected lines 
-            final_lines = self.fit_lines(categorized_buckets)
-            debug_frame = self.debug_draw_fit_lines(frame, final_lines)
-            if callable(self.on_debug):
-                self.on_debug("Fitted Lines", debug_frame)
-            
-            # Extract new detected corners
-            detected_corner, dst_pts = self.extract_corners(final_lines)
-            debug_frame = self.debug_draw_corners(frame, detected_corner)
-            if callable(self.on_debug):
-                self.on_debug("Intersections", debug_frame)
-            
-            # Feeding to the next cycle
-            if detected_corner is not None:
-                try:
-                    src_pts32 = np.array(detected_corner, dtype=np.float32)
-                    dst_pts32 = np.array(dst_pts, dtype=np.float32)
-                    # Update the Homography Matrix back to detected edges
-                    # current_H, _ = cv2.findHomography(detected_corner, dst_pts)
-                    new_H = cv2.getPerspectiveTransform(src_pts32, dst_pts32)
+        # Ghost Matcher sorts them into buckets
+        ghost_lines, categorized_buckets, rejected_segments = self.match_lines_to_ghost_court(raw_lines, current_H)
+        final_lines = self.fit_lines(categorized_buckets)
+        debug_frame = self.debug_draw_fit_lines(frame, final_lines)
+        if callable(self.on_debug):
+            self.on_debug("Fitted Lines", debug_frame)
 
-                    return new_H, src_pts32, dst_pts32
-                except cv2.error as e:
-                    print(f"OpenCV Error caught: {e}")
+        # Extract all multi-line intersections
+        src_pts, dst_pts = self.extract_all_intersections(final_lines)
+        # print("src_pts")
+        # print(src_pts)
+        # print(dst_pts)
+        debug_frame = self.debug_draw_corners(frame, src_pts)
+        if callable(self.on_debug):
+            self.on_debug("Intersections", debug_frame)
 
-        return None, None, None
+        debug_frame = self.debug_draw_ghost_matching(frame, ghost_lines, categorized_buckets,
+                                                     rejected_segments)
+        if callable(self.on_debug):
+            self.on_debug("combined debug", debug_frame)
+
+        if src_pts is None or len(src_pts) < 4:
+            return None, None, None
+
+        # Directly compute global homography mapping camera -> master 1800x900 canvas
+        H_global, inliers = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 4.0)
+        if H_global is None:
+            return None, None, None
+
+        # Compute the 4 canonical corners in image space directly from H_global
+        try:
+            H_inv = np.linalg.inv(H_global)
+            full_court_corners = np.array([
+                [0, 0], [1800, 0], [1800, 900], [0, 900]
+            ], dtype=np.float32).reshape(-1, 1, 2)
+            
+            canonical_image_corners = cv2.perspectiveTransform(full_court_corners, H_inv)
+            return H_global, canonical_image_corners, full_court_corners
+        except np.linalg.LinAlgError:
+            return None, None, None
         
+    def _intersect(self, line1, line2):
+        """Finds intersection point (x, y) between two fitted lines."""
+        if line1["vertical"] and line2["vertical"]:
+            return None
+        if not line1["vertical"] and not line2["vertical"]:
+            if abs(line1["slope"] - line2["slope"]) < 1e-4:
+                return None  # Parallel lines
+            x = (line2["intercept"] - line1["intercept"]) / (line1["slope"] - line2["slope"])
+            y = line1["slope"] * x + line1["intercept"]
+            return [x, y]
+
+        vert = line1 if line1["vertical"] else line2
+        non_vert = line2 if line1["vertical"] else line1
+        x = vert["x_intercept"]
+        y = non_vert["slope"] * x + non_vert["intercept"]
+        return [x, y]
+
+    def extract_all_intersections(self, final_court_lines):
+        """
+        Intersects every detected horizontal line with every detected vertical line
+        and maps directly to global blueprint court coordinates.
+        """
+        src_points = []
+        dst_points = []
+
+        h_names = [k for k in ["top_sideline", "bottom_sideline"] if k in final_court_lines]
+        v_names = [k for k in ["left_baseline", "left_attackline", "center_line", 
+                                "right_attackline", "right_baseline"] if k in final_court_lines]
+
+        # Need at least both sidelines and 2 verticals (min 4 points)
+        if len(h_names) < 2 or len(v_names) < 2:
+            return None, None
+
+        for h_name in h_names:
+            h_line = final_court_lines[h_name]
+            court_y = self.blueprint_lines[h_name]["court_y"]
+
+            for v_name in v_names:
+                v_line = final_court_lines[v_name]
+                court_x = self.blueprint_lines[v_name]["court_x"]
+
+                pt = self._intersect(h_line, v_line)
+                if pt is not None:
+                    src_points.append(pt)
+                    dst_points.append([court_x, court_y])
+
+        if len(src_points) < 4:
+            return None, None
+
+        return np.array(src_points, dtype=np.float32), np.array(dst_points, dtype=np.float32)
+
+    def mask_known_decals(self, edge_frame, current_H):
+        if current_H is None:
+            return edge_frame
+
+        try:
+            H_inv = np.linalg.inv(current_H)
+            # Bounding box for center court decal
+            decal_bev = np.array([
+                [700, 250], [1100, 250], [1100, 650], [700, 650]
+            ], dtype=np.float32).reshape(-1, 1, 2)
+
+            decal_cam = cv2.perspectiveTransform(decal_bev, H_inv).astype(np.int32)
+            cv2.fillPoly(edge_frame, [decal_cam], 0)
+        except np.linalg.LinAlgError:
+            pass
+
+        return edge_frame
+
+    def debug_draw_ghost_matching(self, frame, ghost_lines, matched_results, rejected_segments):
+        debug_img = frame.copy()
+        overlay = debug_img.copy()
+
+        # Distinct colors for each court line
+        palette = {
+            "top_sideline":     (0, 255, 255),   # Yellow
+            "bottom_sideline":  (0, 200, 0),     # Green
+            "left_baseline":    (255, 100, 0),   # Blue
+            "left_attackline":  (255, 0, 255),   # Magenta
+            "center_line":      (255, 255, 255), # White
+            "right_attackline": (180, 0, 255),   # Purple
+            "right_baseline":   (0, 140, 255),   # Orange
+        }
+
+        # Draws a semi-transparent band showing the distance threshold (e.g. +/- 15 px)
+        dist_thresh = 18.0 # match width distance threshold
+        for name, ghost in ghost_lines.items():
+            p1 = np.array(ghost["p1"], dtype=np.float32)
+            p2 = np.array(ghost["p2"], dtype=np.float32)
+            line_vec = p2 - p1
+            length = np.linalg.norm(line_vec) + 1e-6
+            normal = np.array([-line_vec[1], line_vec[0]]) / length * dist_thresh
+
+            # 4 corners of the tolerance band corridor
+            poly = np.array([
+                p1 + normal, p2 + normal,
+                p2 - normal, p1 - normal
+            ], dtype=np.int32)
+
+            color = palette.get(name, (128, 128, 128))
+            cv2.fillPoly(overlay, [poly], color)
+            # Centerline of ghost
+            cv2.line(debug_img, tuple(p1.astype(int)), tuple(p2.astype(int)), color, 1, cv2.LINE_AA)
+
+        # Blend ghost envelopes at 25% opacity
+        cv2.addWeighted(overlay, 0.25, debug_img, 0.75, 0, debug_img)
+
+        # # DRAW REJECTED RAW SEGMENTS
+        # for seg, reason in rejected_segments:
+        #     x1, y1, x2, y2 = seg
+        #     # Thin red line for rejected
+        #     cv2.line(debug_img, (x1, y1), (x2, y2), (0, 0, 180), 1, cv2.LINE_AA)
+
+        # DRAW MATCHED RAW SEGMENTS
+        for name, segments in matched_results.items():
+            color = palette.get(name, (0, 255, 0))
+            for seg in segments:
+                x1, y1, x2, y2 = seg
+                cv2.line(debug_img, (x1, y1), (x2, y2), color, 3, cv2.LINE_AA)
+                # Draw small endpoint dots
+                cv2.circle(debug_img, (x1, y1), 3, (0, 0, 0), -1)
+                cv2.circle(debug_img, (x2, y2), 3, (0, 0, 0), -1)
+
+        # # ON-SCREEN HUD (Counters and Breakdown)
+        # cv2.rectangle(debug_img, (10, 10), (320, 210), (0, 0, 0), -1)
+        # cv2.rectangle(debug_img, (10, 10), (320, 210), (255, 255, 255), 1)
+
+        # cv2.putText(debug_img, f"Hough Diagnostic View", (20, 30),
+        #             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+
+        # y = 55
+        # for name in self.blueprint.keys():
+        #     matched_n = len(matched_results.get(name, []))
+        #     col = palette.get(name, (200, 200, 200))
+        #     status = f"{matched_n} segs"
+        #     cv2.putText(debug_img, f"{name}:", (20, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, col, 1)
+        #     cv2.putText(debug_img, status, (180, y), cv2.FONT_HERSHEY_SIMPLEX, 0.42, 
+        #                 (0, 255, 0) if matched_n > 0 else (100, 100, 100), 1)
+        #     y += 20
+
+        # total_rej = len(rejected_segments)
+        # cv2.putText(debug_img, f"Rejected Segments: {total_rej}", (20, y + 10),
+        #             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 100, 255), 1)
+
+        return debug_img

@@ -7,11 +7,22 @@ from canvas.visualizer import FieldProjector
 from data_manager.dataclass import *
 
 class DelayBuffer:
-    def __init__(self, buffer_size=10, mapper_handler: FieldProjector =None):
+    def __init__(self, buffer_size=10, mapper_handler: FieldProjector =None, court_size=(1800, 900)):
         self.buffer_size = buffer_size
         # Stores tuples of (frame, FrameResult)
         self.queue: deque[tuple[np.ndarray, FrameResult]] = deque(maxlen=buffer_size)
         self.mapper = mapper_handler
+
+        # Static destination reference points for the entire match
+        self.base_dst_points = np.array([
+            [0, 0],
+            [court_size[0], 0],
+            [court_size[0], court_size[1]],
+            [0, court_size[1]]
+        ], dtype=np.float32).reshape(-1, 1, 2)
+
+        # 5-frame normalized smoothing kernel
+        self.gaussian_weights = np.array([0.061, 0.242, 0.383, 0.242, 0.061], dtype=np.float32)
 
     def _interpolate_missing_players(self):
         """
@@ -218,24 +229,152 @@ class DelayBuffer:
             new_H, _ = cv2.findHomography(smoothed_corners, target_result.dst_points)
             target_result.homography_matrix = new_H
 
-    def push(self, frame, result: FrameResult):
-        """Adds a new frame to the end of the queue and repairs historical data."""
+    def push(self, frame, result):
+        """Appends frame and repairs history over the sliding window."""
         self.queue.append((frame, result))
-        
-        # If have enough history, run repair algorithms across the buffer
-        if len(self.queue) > 2:
-            self._interpolate_camera_loss()    # If Hough/LK totally failed, interpolate the 4 corners
-            self._interpolate_missing_players()
 
-            self._smooth_camera()              # Fix the matrix FIRST
-            self._smooth_trajectories()
+        if len(self.queue) >= 5:
+            self._interpolate_camera_gaps()
+            self._smooth_camera_trajectory()
+            self._interpolate_missing_players()
+            self._smooth_player_trajectories()
 
     def pop(self):
-        """Yields the oldest frame (N - buffer_size) which is now fully corrected."""
-        if len(self.queue) == self.buffer_size:
-            # Pop off the left side of the queue (the oldest frame)
-            return self.queue.popleft()
-        return None, None
+        """Yields the fully stabilized, finalized frame (N - buffer_size)."""
+        if len(self.queue) < self.buffer_size:
+            return None, None
+
+        frame, result = self.queue.popleft()
+
+        # Execute BEV coordinate projection at the exit point
+        if result.homography_matrix is not None and self.mapper is not None:
+            for player in result.players:
+                # Use ground contact point (bottom-center of bbox or ankle midpoint)
+                src_x = player.src_coords.x
+                src_y = player.src_coords.y
+                
+                pt = np.array([[[src_x, src_y]]], dtype=np.float32)
+                bev_pt = cv2.perspectiveTransform(pt, result.homography_matrix)[0][0]
+
+                # player.map_coords.x = float(bev_pt[0])
+                # player.map_coords.y = float(bev_pt[1])
+                player.map_coords = Vector2D(float(bev_pt[0]), float(bev_pt[1]))
+
+        return frame, result
+
+    def _interpolate_camera_gaps(self):
+        """Fills tracking dropped frames linearly between valid camera keyframes."""
+        end_idx = len(self.queue) - 1
+        if self.queue[end_idx][1].court_corners is None:
+            return
+
+        # Find previous valid frame
+        start_idx = -1
+        for i in range(end_idx - 1, -1, -1):
+            if self.queue[i][1].court_corners is not None:
+                start_idx = i
+                break
+
+        gap = end_idx - start_idx - 1
+        if start_idx != -1 and gap > 0:
+            c_start = self.queue[start_idx][1].court_corners
+            c_end = self.queue[end_idx][1].court_corners
+            step = (c_end - c_start) / (gap + 1)
+
+            for s, q_idx in enumerate(range(start_idx + 1, end_idx), 1):
+                interp_corners = c_start + (step * s)
+                self.queue[q_idx][1].court_corners = interp_corners
+                H, _ = cv2.findHomography(interp_corners, self.base_dst_points)
+                self.queue[q_idx][1].homography_matrix = H
+
+    def _smooth_camera_trajectory(self):
+        """Applies a 5-tap Gaussian window to the canonical corners of the middle frame."""
+        mid_idx = len(self.queue) // 2
+        target_res = self.queue[mid_idx][1]
+
+        # Ensure full 5-frame local window exists around mid_idx
+        window_indices = list(range(mid_idx - 2, mid_idx + 3))
+        if any(idx < 0 or idx >= len(self.queue) for idx in window_indices):
+            return
+
+        sampled_corners = []
+        for idx in window_indices:
+            corners = self.queue[idx][1].court_corners
+            if corners is None:
+                return  # Skip smoothing if window contains unresolved drops
+            sampled_corners.append(corners)
+
+        # Weighted temporal average: sum(w_i * corner_i)
+        sampled_corners = np.array(sampled_corners)  # shape (5, 4, 1, 2)
+        smoothed_corners = np.sum(sampled_corners * self.gaussian_weights[:, None, None, None], axis=0)
+
+        target_res.court_corners = smoothed_corners.astype(np.float32)
+        H_smooth, _ = cv2.findHomography(target_res.court_corners, self.base_dst_points)
+        target_res.homography_matrix = H_smooth
+
+    def _interpolate_missing_players(self):
+        """Interpolates short occlusions (1-3 frames) in image space."""
+        newest = self.queue[-1][1]
+        for p in newest.players:
+            tid = p.track_id
+            if tid == -1:
+                continue
+
+            last_seen = -1
+            for i in range(len(self.queue) - 2, -1, -1):
+                if any(x.track_id == tid for x in self.queue[i][1].players):
+                    last_seen = i
+                    break
+
+            missing = (len(self.queue) - 1) - last_seen - 1
+            if last_seen != -1 and 0 < missing <= 3:
+                p_start = next(x for x in self.queue[last_seen][1].players if x.track_id == tid)
+                p_end = p
+
+                dx1 = (p_end.bbox.x1 - p_start.bbox.x1) / (missing + 1)
+                dy1 = (p_end.bbox.y1 - p_start.bbox.y1) / (missing + 1)
+                dx2 = (p_end.bbox.x2 - p_start.bbox.x2) / (missing + 1)
+                dy2 = (p_end.bbox.y2 - p_start.bbox.y2) / (missing + 1)
+
+                for step, q_idx in enumerate(range(last_seen + 1, len(self.queue) - 1), 1):
+                    interp_bbox = BBox(
+                        p_start.bbox.x1 + dx1 * step,
+                        p_start.bbox.y1 + dy1 * step,
+                        p_start.bbox.x2 + dx2 * step,
+                        p_start.bbox.y2 + dy2 * step
+                    )
+                    src_coords = interp_bbox.bottom_center
+                    ghost = PlayerDetection(
+                        track_id=tid,
+                        bbox=interp_bbox,
+                        src_coords=src_coords,
+                        team_id=p.team_id,
+                        map_coords=Vector2D(0, 0),  # Calculated on pop()
+                        confidence=0.0
+                    )
+                    self.queue[q_idx][1].players.append(ghost)
+
+    def _smooth_player_trajectories(self):
+        """Smooths raw image bounding boxes with a centered 3-tap window."""
+        mid_idx = len(self.queue) // 2
+        target_players = self.queue[mid_idx][1].players
+
+        for tp in target_players:
+            tid = tp.track_id
+            if tid == -1 or tp.confidence == 0.0:
+                continue
+
+            history_boxes = []
+            for i in [mid_idx - 1, mid_idx, mid_idx + 1]:
+                if 0 <= i < len(self.queue):
+                    match = next((p for p in self.queue[i][1].players if p.track_id == tid), None)
+                    if match:
+                        history_boxes.append([match.bbox.x1, match.bbox.y1, match.bbox.x2, match.bbox.y2])
+
+            if len(history_boxes) == 3:
+                avg = np.mean(history_boxes, axis=0)
+                tp.bbox.x1, tp.bbox.y1, tp.bbox.x2, tp.bbox.y2 = avg
+                tp.src_coords = tp.bbox.bottom_center
 
     def drain(self):
         """Yields remaining frames, smoothing them using only past data."""

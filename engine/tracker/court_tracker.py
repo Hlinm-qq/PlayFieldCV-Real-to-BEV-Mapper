@@ -6,6 +6,43 @@ from engine.detection.hough_detector import *
 from utils.utils import *
 from data_manager.output_manager import PipelineDebugger
 
+class CornerSmoother:
+    def __init__(self, max_step_px=10.0, alpha_lk=0.80, alpha_hough=0.35):
+        """
+        max_step_px: Maximum allowed movement per frame in pixels (prevents jumping).
+        alpha_lk: High responsiveness for continuous optical flow.
+        alpha_hough: Moderate smoothing when Hough recalibrates (blends changes smoothly).
+        """
+        self.corners = None
+        self.max_step_px = max_step_px
+        self.alpha_lk = alpha_lk
+        self.alpha_hough = alpha_hough
+
+    def initialize(self, initial_corners):
+        self.corners = initial_corners.astype(np.float32).copy()
+
+    def update(self, target_corners, source="lk"):
+        if self.corners is None:
+            self.corners = target_corners.astype(np.float32).copy()
+            return self.corners
+
+        target = target_corners.astype(np.float32)
+        alpha = self.alpha_hough if source == "hough" else self.alpha_lk
+
+        # Calculate displacement vector for each of the 4 corners
+        delta = target - self.corners  # shape: (4, 1, 2)
+        distances = np.linalg.norm(delta, axis=2)  # shape: (4, 1)
+        max_dist = np.max(distances)
+
+        # Slew-rate limiter: if Hough or LK jumps by more than max_step_px, clamp the step
+        if max_dist > self.max_step_px:
+            clamp_factor = self.max_step_px / max_dist
+            delta = delta * clamp_factor
+
+        # Apply exponential blend
+        self.corners = self.corners + (alpha * delta)
+        return self.corners.copy()
+    
 class CourtTracker:
     def __init__(
             self, 
@@ -32,10 +69,8 @@ class CourtTracker:
         self.current_corners = None
         self.base_dst_points = None
 
-        self.correction_step = None       # How much to nudge per frame
-        self.correction_frames_left = 0   # How many frames left to nudge
-
         self.lk_failure_streak = 0
+        self.smoother = CornerSmoother(max_step_px=10.0, alpha_lk=0.85, alpha_hough=0.30)
 
     def initialize(self, frame, src_corners, base_dst_points):
         self.base_dst_points = base_dst_points.astype(np.float32).reshape(-1, 1, 2)
@@ -48,6 +83,7 @@ class CourtTracker:
         initial_mask = self.masker.get_mask(frame, self.current_corners, self.current_matrix, self.base_dst_points)
         self.lk.initialize(frame, src_corners, base_dst_points, initial_mask)
 
+        self.smoother.initialize(self.current_corners)
         # cv2.imshow("initial_mask", initial_mask)
         # print("init hough result")
         # print(self.current_matrix)
@@ -66,8 +102,6 @@ class CourtTracker:
         # Pass frame and the mask to optical flow engine
         new_corners, lk_health = self.lk.update_matrix(frame, safe_floor_mask)
         
-        detected_corners = None
-        dst_pts = None
         health_thres = 0.40
 
         if lk_health < health_thres or new_corners is None:
@@ -76,78 +110,92 @@ class CourtTracker:
             self.lk_failure_streak = 0
 
         needs_hough = (self.lk_failure_streak >= 4) or (frame_idx % self.hough_interval == 0)
+        hough_applied = False
+        detected_corners, dst_pts = None, None
         
         # Fallback to Hough if LK health is low or when recalibration
+        # Hough Verification / Recalibration
         if needs_hough:
-            hough_matrix, hough_corners, dst_pts32 = self.hough.detect(frame, self.current_matrix)
-            detected_corners = hough_corners
-            dst_pts = dst_pts32
+            h_matrix, h_corners, h_dst = self.hough.detect(frame, self.current_matrix)
 
-            if self._validate_hough_reprojection(hough_corners, dst_pts32, max_error_units=60.0):
-                # Valid matrix mapping image -> court from the detected sub-area
-                valid_h_matrix, _ = cv2.findHomography(
-                    hough_corners.reshape(-1, 1, 2), 
-                    dst_pts32.reshape(-1, 1, 2), 
-                    cv2.RANSAC, 
-                    3.0
-                )
+            # Validate reprojection error
+            if h_matrix is not None and self._validate_hough_reprojection(h_corners, h_dst):
+                # SMOOTHER UPDATE: Source = "hough" (smooths reference switches)
+                self.current_corners = self.smoother.update(h_corners, source="hough")
 
-                if valid_h_matrix is not None:
-                    h_inv = np.linalg.inv(valid_h_matrix)
-                    canonical_hough_corners = cv2.perspectiveTransform(self.base_dst_points, h_inv)
+                # Synchronize Masker and LK with the smoothed corners
+                self.masker.recalibrate(frame, new_corners=self.current_corners)
+                new_mask = self.masker.get_mask(frame)
+                self.lk.reset_points(frame, self.current_corners, new_mask)
 
-                    if new_corners is not None and lk_health >= 0.40:
-                        new_corners = (0.75 * new_corners) + (0.25 * canonical_hough_corners)
-                    else:
-                        new_corners = canonical_hough_corners
+                detected_corners = h_corners
+                dst_pts = h_dst
+                self.lk_failure_streak = 0
+                hough_applied = True
 
-                    # Recalibrate masker and LK tracker
-                    self.masker.recalibrate(frame, hough_corners)
-                    new_mask = self.masker.get_mask(frame, new_corners, valid_h_matrix, dst_pts32, player_detection)
-                    self.lk.reset_points(frame, canonical_hough_corners, new_mask)
+        # LK Flow Continuous Update (if Hough did not run or failed)
+        if not hough_applied:
+            if new_corners is not None and lk_health >= 0.20:
+                # SMOOTHER UPDATE: Source = "lk" (fluid frame-to-frame tracking)
+                self.current_corners = self.smoother.update(new_corners, source="lk")
+            else:
+                # Both failed: Coast on the previous smoothed position
+                pass
 
-        if new_corners is None:
-            return self.current_matrix, safe_floor_mask, detected_corners, dst_pts
-
-        self.current_corners = new_corners.copy()
+        # Keep LK tracking anchor and Homography matrix aligned to active state
         self.lk.corner_pixels = self.current_corners.copy()
-
-        # Update homography using smoothed canonical points
         self.current_matrix, _ = cv2.findHomography(self.current_corners, self.base_dst_points)
 
-        print("self.current_corners")
-        print(self.current_corners)
-        print(self.current_matrix)
-        print(lk_health)
-        
         return self.current_matrix, safe_floor_mask, detected_corners, dst_pts
 
-    def _is_matrix_valid(self, matrix):
-        """Mathematical guardrail to prevent tracking collapse"""
-        if matrix is None or matrix.shape != (3, 3):
-            return False
+    # def _is_matrix_valid(self, matrix):
+    #     """Mathematical guardrail to prevent tracking collapse"""
+    #     if matrix is None or matrix.shape != (3, 3):
+    #         return False
             
-        # If the determinant of the top-left 2x2 is near zero, 
-        # the perspective has collapsed into a 1D line.
-        det = np.linalg.det(matrix[0:2, 0:2])
-        if abs(det) < 1e-4:
-            return False
+    #     # If the determinant of the top-left 2x2 is near zero, 
+    #     # the perspective has collapsed into a 1D line.
+    #     det = np.linalg.det(matrix[0:2, 0:2])
+    #     if abs(det) < 1e-4:
+    #         return False
             
-        return True
+    #     return True
 
-    def _apply_ema(self, new_matrix):
-        """Prevents the 2D court overlay from vibrating frame-to-frame"""
-        # Normalize matrices so H[2,2] is 1.0 before blending
-        new_matrix = new_matrix / new_matrix[2, 2]
-        old_matrix = self.current_matrix / self.current_matrix[2, 2]
+    # def _apply_ema(self, new_matrix):
+    #     """Prevents the 2D court overlay from vibrating frame-to-frame"""
+    #     # Normalize matrices so H[2,2] is 1.0 before blending
+    #     new_matrix = new_matrix / new_matrix[2, 2]
+    #     old_matrix = self.current_matrix / self.current_matrix[2, 2]
         
-        smoothed = (self.ema_alpha * new_matrix) + ((1 - self.ema_alpha) * old_matrix)
-        return smoothed / smoothed[2, 2]
+    #     smoothed = (self.ema_alpha * new_matrix) + ((1 - self.ema_alpha) * old_matrix)
+    #     return smoothed / smoothed[2, 2]
 
-    def _validate_hough_reprojection(self, hough_corners, dst_pts, max_error_units=60.0):
+    # def _validate_hough_reprojection(self, hough_corners, dst_pts, max_error_units=60.0):
+    #     """
+    #     Validates Hough detection across variable court regions by projecting
+    #     image detections into canonical court coordinates via the current matrix.
+    #     """
+    #     if hough_corners is None or dst_pts is None or self.current_matrix is None:
+    #         return False
+
+    #     h_pts = hough_corners.astype(np.float32).reshape(-1, 1, 2)
+    #     target_pts = dst_pts.astype(np.float32).reshape(-1, 2)
+
+    #     # Map detected image points into court space using the active camera tracking state
+    #     projected_court_pts = cv2.perspectiveTransform(h_pts, self.current_matrix).reshape(-1, 2)
+
+    #     # Calculate Euclidean error in court metric units
+    #     point_errors = np.linalg.norm(projected_court_pts - target_pts, axis=1)
+    #     mean_error = np.mean(point_errors)
+
+    #     # Reject if average reprojection deviation exceeds threshold
+    #     return mean_error < max_error_units
+
+    def _validate_hough_reprojection(self, hough_corners, dst_pts, max_single_error=15.0, max_mean_error=8.0):
         """
-        Validates Hough detection across variable court regions by projecting
-        image detections into canonical court coordinates via the current matrix.
+        Validates detected intersections against the expected court layout.
+        - max_single_error: Max allowed error for ANY single point (15.0 px = 15 cm).
+        - max_mean_error: Max allowed average error across all points (8.0 px = 8 cm).
         """
         if hough_corners is None or dst_pts is None or self.current_matrix is None:
             return False
@@ -155,15 +203,30 @@ class CourtTracker:
         h_pts = hough_corners.astype(np.float32).reshape(-1, 1, 2)
         target_pts = dst_pts.astype(np.float32).reshape(-1, 2)
 
-        # Map detected image points into court space using the active camera tracking state
+        # Map detected camera intersections into canonical court space
         projected_court_pts = cv2.perspectiveTransform(h_pts, self.current_matrix).reshape(-1, 2)
 
-        # Calculate Euclidean error in court metric units
+        # Euclidean distance per point in canvas pixels (100 px = 1 meter)
         point_errors = np.linalg.norm(projected_court_pts - target_pts, axis=1)
-        mean_error = np.mean(point_errors)
 
-        # Reject if average reprojection deviation exceeds threshold
-        return mean_error < max_error_units
+        # Reject if ANY single intersection deviates by more than threshold
+        if np.max(point_errors) > max_single_error:
+            return False
+
+        # Reject if overall fit deviation exceeds mean error
+        if np.mean(point_errors) > max_mean_error:
+            return False
+
+        # Geometric sanity check: verify court lines remain roughly perpendicular
+        if len(hough_corners) >= 4:
+            v0 = hough_corners[1][0] - hough_corners[0][0] # Top edge vector
+            v1 = hough_corners[3][0] - hough_corners[0][0] # Left edge vector
+            cos_angle = np.abs(np.dot(v0, v1) / (np.linalg.norm(v0) * np.linalg.norm(v1) + 1e-6))
+            # In perspective, angle should not collapse (cos_angle should stay well below 0.35)
+            if cos_angle > 0.35:
+                return False
+
+        return True
 
     def debug_draw_lk_mask(self, frame, mask):
         if mask is not None:

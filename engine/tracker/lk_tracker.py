@@ -77,29 +77,45 @@ class LKTracker:
         if len(validated_new) < 5:
             return None, 0.0 
 
-        # Translation & Outlier Rejection
-        flow_vectors = validated_new - validated_old
-        median_translation = np.median(flow_vectors, axis=0) # [dx, dy]
+        delta_H = None
+        is_homography_valid = False
 
-        # Strip out points that aren't moving with the dominant floor
-        deviations = np.linalg.norm(flow_vectors - median_translation, axis=1)
-        inlier_mask = deviations < 4.0
-        
-        inliers_new = validated_new[inlier_mask]
-        inliers_old = validated_old[inlier_mask]
-        
-        lk_health = len(inliers_new) / max(1, len(self.tracked_features))
-        if len(inliers_new) < 5 or lk_health < 0.25:
+        # Attempt Full 8-DOF Projective Homography
+        if len(validated_new) >= 16:
+            H_cand, inliers = cv2.findHomography(
+                validated_old, validated_new, method=cv2.RANSAC, ransacReprojThreshold=2.0
+            )
+            if H_cand is not None:
+                # Check condition number to avoid singular/collapsing matrices
+                cond = np.linalg.cond(H_cand)
+                # Perspective terms h20 and h21 must represent plausible frame-to-frame angular velocity
+                h20, h21 = abs(H_cand[2, 0]), abs(H_cand[2, 1])
+                
+                # Well-behaved inter-frame homographies have cond < 50 and tiny bottom-row values
+                if cond < 50.0 and h20 < 1e-3 and h21 < 1e-3:
+                    delta_H = H_cand
+                    is_homography_valid = True
+
+        # Estimate Affine Transform (Translation + Rotation + Scale)
+        # Fallback to Partial Affine if Homography fails or floor points are poorly distributed
+        if not is_homography_valid:
+            affine_mat, inliers = cv2.estimateAffinePartial2D(
+                validated_old, validated_new, method=cv2.RANSAC, ransacReprojThreshold=2.5
+            )
+            if affine_mat is None:
+                return None, 0.0
+            delta_H = np.eye(3, dtype=np.float32)
+            delta_H[0:2, :] = affine_mat
+
+        inlier_count = int(np.sum(inliers)) if inliers is not None else 0
+        lk_health = inlier_count / max(1, len(self.tracked_features))
+
+        if inlier_count < 6 or lk_health < 0.20:
             return None, lk_health
 
-        final_translation = np.mean(inliers_new - inliers_old, axis=0)
-
-        # Create a Rigid Translation Matrix 
-        delta_H = np.array([
-            [1.0, 0.0, final_translation[0]],
-            [0.0, 1.0, final_translation[1]],
-            [0.0, 0.0, 1.0]
-        ], dtype=np.float32)
+        # # Lift 2x3 affine matrix to 3x3 projective matrix
+        # delta_H = np.eye(3, dtype=np.float32)
+        # delta_H[0:2, :] = affine_matrix
 
         # Update corner pixels
         new_corner_pixels = cv2.perspectiveTransform(self.corner_pixels.reshape(-1, 1, 2), delta_H)
@@ -138,74 +154,123 @@ class LKTracker:
         return debug_frame
 
 class DynamicCourtMasker:
-    def __init__(self, court_length, court_width, court_margin=2):
-        """
-        court_margin: Distance outside boundary lines (in metric court units)
-                         to include as valid playable floor (free zone).
-        """
-        self.court_length = court_length
-        self.court_width = court_width
-        self.court_margin = court_margin
-        self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    def __init__(self, court_length=1800, court_width=900, court_margin_meters=0.5, px_per_meter=100.0):
+        self.court_length = int(court_length)
+        self.court_width = int(court_width)
+        
+        self.margin_px = int(court_margin_meters * px_per_meter)
 
-    def initialize(self, frame, court_corners, player_detections=None):
-        # Verification check
-        return court_corners is not None and len(court_corners) == 4
+        # 4 corners in canonical court coordinates (expanded outwards by margin)
+        m = self.margin_px
+        self.canonical_floor_corners = np.array([
+            [-m, -m],                                  # Top-Left
+            [self.court_length + m, -m],               # Top-Right
+            [self.court_length + m, self.court_width + m], # Bottom-Right
+            [-m, self.court_width + m]                 # Bottom-Left
+        ], dtype=np.float32).reshape(-1, 1, 2)
 
-    def recalibrate(self, frame=None, new_corners=None, player_detections=None):
-        # The mask updates automatically from the latest tracked corners.
-        pass
+        # Persistent internal state
+        self.cached_corners = None
+        self.cached_H = None
+        self.base_dst_points = np.array([
+            [0, 0],
+            [self.court_length, 0],
+            [self.court_length, self.court_width],
+            [0, self.court_width]
+        ], dtype=np.float32).reshape(-1, 1, 2)
+
+    def initialize(self, frame, court_corners, initial_H=None):
+        self.cached_corners = court_corners.copy() if court_corners is not None else None
+        if initial_H is not None:
+            self.cached_H = initial_H.copy()
+        elif self.cached_corners is not None:
+            self.cached_H, _ = cv2.findHomography(self.cached_corners, self.base_dst_points)
+        return self.cached_corners is not None
+
+    def recalibrate(self, frame=None, new_corners=None, new_H=None):
+        """Saves recalibrated state so zero-arg get_mask(frame) maintains court boundary."""
+        if new_corners is not None:
+            self.cached_corners = new_corners.copy()
+        if new_H is not None:
+            self.cached_H = new_H.copy()
+        elif self.cached_corners is not None:
+            self.cached_H, _ = cv2.findHomography(self.cached_corners, self.base_dst_points)
 
     def get_mask(self, frame, court_corners=None, current_H=None, base_dst_points=None, player_detections=None):
-        """
-        Generates a floor mask by combining:
-        1. Projected geometric court boundaries
-        2. Bounded free-zone expansion
-        3. Detected player subtractions
-        """
         h, w = frame.shape[:2]
+
+        # Sync state if provided
+        if current_H is not None:
+            self.cached_H = current_H
+        if court_corners is not None:
+            self.cached_corners = court_corners
+
         mask = np.zeros((h, w), dtype=np.uint8)
 
         # GEOMETRIC FLOOR REGION
-        # If homography matrix is available, compute expanded polygon
-        if current_H is not None and base_dst_points is not None:
+        if self.cached_H is not None:
             try:
-                h_inv = np.linalg.inv(current_H)
-                
-                # Expand court bounds by court_margin
-                m = self.court_margin
-                expanded_dst = np.array([
-                    [-m, -m],
-                    [self.court_length + m, -m],
-                    [self.court_length + m, self.court_width + m],
-                    [-m, self.court_width + m]
-                ], dtype=np.float32).reshape(-1, 1, 2)
-
-                expanded_corners = cv2.perspectiveTransform(expanded_dst, h_inv)
-                corners_int = np.int32(expanded_corners).reshape((-1, 1, 2))
+                # Map expanded court corners from BEV space -> Image space
+                h_inv = np.linalg.inv(self.cached_H)
+                img_corners = cv2.perspectiveTransform(self.canonical_floor_corners, h_inv)
+                corners_int = np.int32(img_corners).reshape((-1, 1, 2))
                 cv2.fillPoly(mask, [corners_int], 255)
             except np.linalg.LinAlgError:
-                # Fallback to direct corners if matrix inversion fails
-                if court_corners is not None:
-                    corners_int = np.int32(court_corners).reshape((-1, 1, 2))
+                if self.cached_corners is not None:
+                    corners_int = np.int32(self.cached_corners).reshape((-1, 1, 2))
                     cv2.fillPoly(mask, [corners_int], 255)
-        elif court_corners is not None:
-            corners_int = np.int32(court_corners).reshape((-1, 1, 2))
+        elif self.cached_corners is not None:
+            corners_int = np.int32(self.cached_corners).reshape((-1, 1, 2))
             cv2.fillPoly(mask, [corners_int], 255)
         else:
-            # Cold start fallback
-            mask[:] = 255
+            mask[:] = 255  # Cold start fallback
 
-        # CLIP TO VISIBLE FRAME BOUNDARIES
-        # Prevents negative coordinates or off-screen projections from distorting OpenCV ops
-        cv2.rectangle(mask, (0, 0), (w - 1, h - 1), 255, 1)
+        # DYNAMIC NET EXCLUSION (high-value stabilization)
+        # Masks out the center net band to prevent LK tracking non-floor net tape
+        if self.cached_H is not None:
+            self._mask_net_post_zone(mask, w, h)
 
         # PLAYER SUBTRACTION (Negative Masking)
         if player_detections:
-            for det in player_detections:
-                x1, y1, x2, y2 = det["xyxy"]
-                pad_x = int((x2 - x1) * 0.15)
-                pad_y = int((y2 - y1) * 0.15)
+            self._subtract_players(mask, player_detections, w, h)
+
+        return mask
+
+    def _mask_net_post_zone(self, mask, w, h):
+        """Blanks a thin vertical strip around the center net to prevent tracking moving mesh/tape."""
+        try:
+            h_inv = np.linalg.inv(self.cached_H)
+            net_x = self.court_length // 2
+            # 30px width in metric court = 30cm around center line
+            net_poly_bev = np.array([
+                [net_x - 15, -self.margin_px],
+                [net_x + 15, -self.margin_px],
+                [net_x + 15, self.court_width + self.margin_px],
+                [net_x - 15, self.court_width + self.margin_px]
+            ], dtype=np.float32).reshape(-1, 1, 2)
+            
+            net_poly_img = cv2.perspectiveTransform(net_poly_bev, h_inv)
+            cv2.fillPoly(mask, [np.int32(net_poly_img)], 0)
+        except np.linalg.LinAlgError:
+            pass
+
+    def _subtract_players(self, mask, detections, w, h):
+        """Flexible extractor handling dicts, dataclasses, and bounding box formats."""
+        for det in detections:
+            bbox = None
+            if isinstance(det, dict):
+                bbox = det.get("xyxy", None)
+            elif hasattr(det, "bbox"):
+                b = det.bbox
+                bbox = [b.x1, b.y1, b.x2, b.y2]
+            elif isinstance(det, (list, tuple, np.ndarray)) and len(det) >= 4:
+                bbox = det[:4]
+
+            if bbox is not None:
+                x1, y1, x2, y2 = bbox
+                # 10% padding around player body
+                pad_x = int((x2 - x1) * 0.10)
+                pad_y = int((y2 - y1) * 0.10)
 
                 px1 = max(0, int(x1 - pad_x))
                 py1 = max(0, int(y1 - pad_y))
@@ -214,4 +279,3 @@ class DynamicCourtMasker:
 
                 cv2.rectangle(mask, (px1, py1), (px2, py2), 0, -1)
 
-        return mask

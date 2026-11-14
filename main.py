@@ -870,7 +870,7 @@ def tracker_pipeline_v3(config: PipelineConfig, device):
                 if frame_counter >= (config.recalibration_rate*2):
                     frame_counter = 0
 
-                raw_lines = court_detector.supercharged_line_detection(frame)
+                raw_lines = court_detector.line_detection(frame)
 
                 if raw_lines is not None:
                     # Ghost Matcher sorts them into buckets
@@ -1225,7 +1225,8 @@ def main():
                             is_run_detect=True,
                             recalibration_rate=2,
                             buffer_size=5,
-                            debug_resolution="svga")
+                            debug_cols=3,
+                            debug_resolution="720p")
     # is_finished = tracker_pipeline_v3(config, device)
     is_finished = flow4(config, device)
 
