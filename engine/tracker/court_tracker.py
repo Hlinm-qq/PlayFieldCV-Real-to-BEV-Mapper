@@ -99,6 +99,8 @@ class CourtTracker:
             frame, self.current_corners, self.current_matrix, self.base_dst_points, player_detection
         )
 
+        self.debug_draw_lk_mask(frame, safe_floor_mask)
+
         # Pass frame and the mask to optical flow engine
         new_corners, lk_health = self.lk.update_matrix(frame, safe_floor_mask)
         
@@ -248,6 +250,10 @@ class CourtTracker:
                 cv2.imshow("Debug: Mask Overlay", debug_view)
 
             combined_view = stitch_two_frames(mask, debug_view)
+
+            if self.debugger is not None:
+                self.debugger.add("LK Mask", combined_view)
+
             return combined_view
 
         return None

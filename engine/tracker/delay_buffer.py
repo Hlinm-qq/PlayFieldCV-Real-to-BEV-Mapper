@@ -229,39 +229,6 @@ class DelayBuffer:
             new_H, _ = cv2.findHomography(smoothed_corners, target_result.dst_points)
             target_result.homography_matrix = new_H
 
-    def push(self, frame, result):
-        """Appends frame and repairs history over the sliding window."""
-        self.queue.append((frame, result))
-
-        if len(self.queue) >= 5:
-            self._interpolate_camera_gaps()
-            self._smooth_camera_trajectory()
-            self._interpolate_missing_players()
-            self._smooth_player_trajectories()
-
-    def pop(self):
-        """Yields the fully stabilized, finalized frame (N - buffer_size)."""
-        if len(self.queue) < self.buffer_size:
-            return None, None
-
-        frame, result = self.queue.popleft()
-
-        # Execute BEV coordinate projection at the exit point
-        if result.homography_matrix is not None and self.mapper is not None:
-            for player in result.players:
-                # Use ground contact point (bottom-center of bbox or ankle midpoint)
-                src_x = player.src_coords.x
-                src_y = player.src_coords.y
-                
-                pt = np.array([[[src_x, src_y]]], dtype=np.float32)
-                bev_pt = cv2.perspectiveTransform(pt, result.homography_matrix)[0][0]
-
-                # player.map_coords.x = float(bev_pt[0])
-                # player.map_coords.y = float(bev_pt[1])
-                player.map_coords = Vector2D(float(bev_pt[0]), float(bev_pt[1]))
-
-        return frame, result
-
     def _interpolate_camera_gaps(self):
         """Fills tracking dropped frames linearly between valid camera keyframes."""
         end_idx = len(self.queue) - 1
@@ -376,46 +343,95 @@ class DelayBuffer:
                 tp.bbox.x1, tp.bbox.y1, tp.bbox.x2, tp.bbox.y2 = avg
                 tp.src_coords = tp.bbox.bottom_center
 
-    def drain(self):
-        """Yields remaining frames, smoothing them using only past data."""
-        while len(self.queue) > 0:
-            
-            # Target the oldest frame about to be popped
-            target_result = self.queue[0][1]
-            
-            # Smooth it using the remaining frames in the queue
-            for target_player in target_result.players:
-                if target_player.track_id == -1 or target_player.confidence == 0.0: 
-                    continue
-                
-                x1s, y1s, x2s, y2s = [], [], [], []
-                
-                # Gather coordinates from whatever is left in the queue
-                for _, result in self.queue:
-                    for p in result.players:
-                        if p.track_id == target_player.track_id:
-                            x1s.append(p.bbox.x1)
-                            y1s.append(p.bbox.y1)
-                            x2s.append(p.bbox.x2)
-                            y2s.append(p.bbox.y2)
-                            break
-                            
-                # Apply Trailing Average
-                if x1s:
-                    target_player.bbox.x1 = sum(x1s) / len(x1s)
-                    target_player.bbox.y1 = sum(y1s) / len(y1s)
-                    target_player.bbox.x2 = sum(x2s) / len(x2s)
-                    target_player.bbox.y2 = sum(y2s) / len(y2s)
-                    
-                    target_player.src_coords = target_player.bbox.bottom_center
-                    frame_matrix = target_result.homography_matrix
-                    if frame_matrix is not None:
-                        map_x, map_y = self.mapper.get_map_coordinate(
-                            target_player.src_coords.x, 
-                            target_player.src_coords.y, 
-                            frame_matrix
-                        )
-                        target_player.map_coords = Vector2D(map_x, map_y)
+    def _project_frame_to_bev(self, result):
+        """Projects ALL players using the finalized matrix."""
+        if result.homography_matrix is None or self.mapper is None:
+            return
 
-            # Pop and yield tail-end frame
-            yield self.queue.popleft()
+        for player in result.players:
+            map_x, map_y = self.mapper.get_map_coordinate(
+                player.src_coords.x,
+                player.src_coords.y,
+                result.homography_matrix
+            )
+            player.map_coords = Vector2D(map_x, map_y)
+
+    def _smooth_tail_frames(self):
+        """Applies bounded centered smoothing to tail frames that never reached mid_idx."""
+        n = len(self.queue)
+        if n < 2:
+            return
+
+        # Frames up to mid_idx were already smoothed during push()
+        start_tail = (n // 2) + 1 if n >= 5 else 0
+
+        for idx in range(start_tail, n):
+            target_res = self.queue[idx][1]
+            # Bounded 3-tap window (at most 1 frame back, 1 frame forward)
+            win_indices = [i for i in (idx - 1, idx, idx + 1) if 0 <= i < n]
+
+            # Smooth tail camera corners & recompute H
+            if target_res.court_corners is not None:
+                valid_corners = [
+                    self.queue[i][1].court_corners
+                    for i in win_indices
+                    if self.queue[i][1].court_corners is not None
+                ]
+                if len(valid_corners) >= 2:
+                    smoothed_c = np.mean(valid_corners, axis=0).astype(np.float32)
+                    target_res.court_corners = smoothed_c
+                    target_res.homography_matrix, _ = cv2.findHomography(
+                        smoothed_c, self.base_dst_points
+                    )
+
+            # Smooth tail player bounding boxes
+            for tp in target_res.players:
+                if tp.track_id == -1 or tp.confidence == 0.0:
+                    continue
+
+                boxes = []
+                for i in win_indices:
+                    match = next((p for p in self.queue[i][1].players if p.track_id == tp.track_id), None)
+                    if match is not None:
+                        boxes.append([match.bbox.x1, match.bbox.y1, match.bbox.x2, match.bbox.y2])
+
+                if len(boxes) >= 2:
+                    avg_box = np.mean(boxes, axis=0)
+                    tp.bbox.x1, tp.bbox.y1, tp.bbox.x2, tp.bbox.y2 = avg_box
+                    tp.src_coords = tp.bbox.bottom_center
+
+    def drain(self):
+        """Flushes remaining frames at end-of-stream with bounded tail smoothing."""
+        if len(self.queue) == 0:
+            return
+    
+        # Smooth only the un-processed tail frames BEFORE popping
+        self._smooth_tail_frames()
+    
+        # Pop and project remaining frame
+        while len(self.queue) > 0:
+            frame, result = self.queue.popleft()
+            self._project_frame_to_bev(result)
+            yield frame, result
+
+    def push(self, frame, result):
+        """Appends frame and repairs history over the sliding window."""
+        self.queue.append((frame, result))
+
+        if len(self.queue) >= 5:
+            self._interpolate_camera_gaps()
+            self._smooth_camera_trajectory()
+            self._interpolate_missing_players()
+            self._smooth_player_trajectories()
+
+    def pop(self):
+        """Yields the fully stabilized, finalized frame (N - buffer_size)."""
+        if len(self.queue) < self.buffer_size:
+            return None, None
+
+        frame, result = self.queue.popleft()
+
+        # Execute BEV coordinate projection at the exit point
+        self._project_frame_to_bev(result)
+
+        return frame, result

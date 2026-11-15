@@ -18,6 +18,7 @@ from canvas.visualizer import *
 from canvas.canvas_utils import *
 
 from pipelines.volleyball_pipeline import VolleyballPipeline, TeamClassifier
+from pipelines.presenter import Presenter
 
 from utils.utils import *
 from config.volleyball import *
@@ -1008,6 +1009,9 @@ def flow4(config: PipelineConfig, device):
     # Calculate sleep target
     target_frame_time = (1.0 / target_fps)
 
+    frame_presenter = Presenter(target_fps, visualizer, dashboard, debug_manager, output_manager, team_classifer, config)
+    frame_presenter.initialize()
+
     frame_stats = get_frame_stats(first_frame)
     if config.save_video and config.frame_count > 5:
         if config.is_combine_result:
@@ -1021,121 +1025,38 @@ def flow4(config: PipelineConfig, device):
             output_manager.init_video_writer(output_video_fps, video_width, video_height)
 
     
-    frame_idx = 1
+    user_aborted = False
+    view_frame_idx = 0
+    frame_idx = 0
+
     try:
+        # Active Stream Processing
         for raw_frame in stream.get_frame():
-            # frame_idx %= config.recalibration_rate
             frame_idx += 1
-
             loop_start = time.perf_counter()
-            loop_start_time = time.time()
 
-            # Pass frame -> Pipeline updates its internal state -> Returns results
             raw_result = pipeline.process_frame(raw_frame, frame_idx)
-
-            # Push to buffer
             delay_buffer.push(raw_frame, raw_result)
 
             delayed_frame, corrected_result = delay_buffer.pop()
 
-            # frame = raw_frame
-            frame = delayed_frame
-            result = corrected_result
-
             if delayed_frame is not None:
-                # Debug
-                debug_frame = court_detector.debug_draw_lk_mask(frame, result.floor_mask)
-                debug_manager.add("LK Mask", debug_frame)
+                view_frame_idx += 1
+                if frame_presenter.present(delayed_frame, corrected_result, view_frame_idx, loop_start):
+                    user_aborted = True
+                    break
+            else:
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    user_aborted = True
+                    break
 
-                # Measures total loop latency
-                total_loop_ms = (time.perf_counter() - loop_start) * 1000
-                process_time = time.time() - loop_start_time
-
-                # Render outputs
-                # canvas = visualizer.draw_empty_court()
-                map_players_data = []
-                for p in result.players:
-                    cv2.rectangle(frame, (int(p.bbox.x1), int(p.bbox.y1)), (int(p.bbox.x2), int(p.bbox.y2)), (0, 0, 255), 2)
-                    cv2.circle(frame, (int(p.src_coords.x), int(p.src_coords.y)), 5, (255, 0, 0), -1)
-                    if p.track_id != -1:
-                        cv2.putText(frame, f"ID: {p.track_id}", (int(p.bbox.x1), int(p.bbox.y1) - 10), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-
-                    if p.team_id == "":
-                        p.team_id = team_classifer.get_locked_team(p.track_id)
-                    color = COLOR_CONFIG.get(p.team_id.lower(), (0,0,0))
-                    # visualizer.draw_player_on_map(canvas, p.map_coords.x, p.map_coords.y, p.track_id, color)
-
-                    map_players_data.append({
-                        "math_x": p.map_coords.x,
-                        "math_y": p.map_coords.y,
-                        "id": p.track_id,
-                        "color": color,
-                        "team_id": p.team_id.lower()
-                    })
-
-                    # print(f"player: {p.track_id} | {p.confidence} | {print_vector(p.src_coords)} | {print_vector(p.map_coords)}")
-
-                # Display telemetry
-                print(f"Raw Frame {frame_idx} | "
-                      f"View Frame {frame_idx - config.buffer_size} | "
-                      f"Total FPS: {1000/total_loop_ms:.1f}")
-
-                # Throttle, short delay to match target FPS, if applicable
-                if target_frame_time > 0 and process_time < target_frame_time:
-                    sleep_amount = target_frame_time - process_time
-                    time.sleep(sleep_amount)
-
-                # Calculate real final FPS
-                total_loop_time = time.time() - loop_start_time
-                actual_fps = 1.0 / total_loop_time if total_loop_time > 0 else 0
-                        
-                # Draw telemetry on screen
-                cv2.putText(frame, f"Target FPS: {target_fps if target_fps > 0 else 'MAX'}", 
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-                cv2.putText(frame, f"Actual FPS: {int(actual_fps)}", 
-                            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                print(f"Target FPS: {target_fps if target_fps > 0 else 'MAX'}")
-                print(f"Actual FPS: {int(actual_fps)}")
-
-                # Render court datas
-                map_bev = visualizer.render(target_w=dashboard.hero_w, target_h=dashboard.hero_h, players=map_players_data)
-                # Route output to dashboard
-                dashboard.add_view("hero", map_bev, "Volleyball BEV")
-                dashboard.add_view("aux", frame, "Raw Detection")
-
-                final_view = dashboard.render()
-                debug_manager.show()
-
-                # if config.is_combine_result:
-                #     # Glue the two images together horizontally
-                #     combined_view = stitch_two_frames(frame, canvas)
-                #     print(get_frame_stats(combined_view))
-                #     # combined_view = cv2.resize(combined_view, (1500, 700)) 
-                
-                combined_view = final_view
-                
-                if config.save_video:
-                    if config.is_combine_result:
-                        output_manager.video_out(combined_view)
-
-                # Display result
-                if not config.is_combine_result:
-                    key_pressed = output_manager.display_frame(frame, "Original Detection")
-                    # key_pressed2 = output_manager.display_frame(canvas, "2D Map")
-                    if key_pressed == ord('q'): break
-                    if key_pressed2 == ord('q'): break
-                else:
-                    key_pressed = output_manager.display_frame(combined_view, "Combined Output")
-                    if key_pressed == ord('q'): break
-
-                if not output_manager.get_is_notebook():
-                    cv2.waitKey(1000 * config.sleep_second)
-                else:
-                    time.sleep(config.sleep_second)
-
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+        # Flush Remaining Buffered Frames at End-of-Stream
+        if not user_aborted:
+            for drained_frame, drained_result in delay_buffer.drain():
+                loop_start = time.perf_counter()
+                view_frame_idx += 1
+                if frame_presenter.present(drained_frame, drained_result, view_frame_idx, loop_start):
+                    break
 
     except KeyboardInterrupt:
         # Catches the Ctrl+C or force-stop
