@@ -35,7 +35,7 @@ class EngineManager:
             imgsz=1280,
             conf=0.1,
             iou=0.5,         # NMS overlap threshold
-            tracker_config="aavolleyball_tracker.yaml"
+            tracker_config="volleyball_tracker.yaml"
         ):
         
         self.engine_type: EngineType = type

@@ -295,3 +295,7 @@ def print_vectors(vectors: Iterable[Vector2D], precision: int = 2) -> None:
     """Helper to cleanly print a batch or list of Vector2Ds (e.g., keypoints)."""
     formatted_items = [f"({v.x:.{precision}f}, {v.y:.{precision}f})" for v in vectors]
     print(f"Vectors [{len(formatted_items)}]: " + ", ".join(formatted_items))
+
+def is_stream(source: str) -> bool:
+    """Webcam index (e.g. '0') or network stream URL, which can't be checked as a path."""
+    return source.isdigit() or "://" in source
