@@ -4,6 +4,7 @@
 *.docx*
 
 .venv/
+.vscode/
 /dataset/
 /output/
 /resources/
