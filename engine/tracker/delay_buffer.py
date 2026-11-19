@@ -281,8 +281,8 @@ class DelayBuffer:
 
     def _interpolate_missing_players(self):
         """Interpolates short occlusions (1-3 frames) in image space."""
-        newest = self.queue[-1][1]
-        for p in newest.players:
+        newest_result = self.queue[-1][1]
+        for p in newest_result.players:
             tid = p.track_id
             if tid == -1:
                 continue
@@ -297,6 +297,14 @@ class DelayBuffer:
             if last_seen != -1 and 0 < missing <= 3:
                 p_start = next(x for x in self.queue[last_seen][1].players if x.track_id == tid)
                 p_end = p
+
+                # Guard against false cross-court ID swaps
+                dist = math.hypot(
+                    p_end.src_coords.x - p_start.src_coords.x,
+                    p_end.src_coords.y - p_start.src_coords.y
+                )
+                if (dist / (missing + 1)) > 50.0:
+                    continue
 
                 dx1 = (p_end.bbox.x1 - p_start.bbox.x1) / (missing + 1)
                 dy1 = (p_end.bbox.y1 - p_start.bbox.y1) / (missing + 1)
